@@ -221,6 +221,71 @@
             </el-col>
           </el-row>
         </el-tab-pane>
+
+        <!-- ================= 技能 ================= -->
+        <el-tab-pane name="skills">
+          <template #label>
+            <span class="tab-label">🛠 技能</span>
+          </template>
+
+          <el-alert type="info" :closable="false" show-icon class="task-alert"
+            title="无头调用 Claude Code 技能（claude -p）：技能来自项目 .claude/skills/ 与 ~/.claude/skills/，每次调用现读文件——新增或修改 SKILL.md 即时生效，无需重启本平台" />
+
+          <div class="toolbar">
+            <el-button :loading="skillsLoading" @click="loadSkills">刷新技能</el-button>
+            <span class="picked-hint">执行走后台任务，进度见顶部提示，结果在下方「最近执行」查看</span>
+          </div>
+
+          <el-empty v-if="!skillsLoading && skills.length === 0"
+            description="没有发现技能——在项目 .claude/skills/ 下建一个含 SKILL.md 的目录，保存后点「刷新技能」立刻可见" />
+
+          <el-row :gutter="14">
+            <el-col v-for="s in skills" :key="s.scope + '-' + s.name" :span="8" class="course-col">
+              <el-card shadow="hover" class="course-card">
+                <div class="course-head">
+                  <span class="course-title">/{{ s.name }}</span>
+                  <el-tag size="small" :type="s.scope === 'project' ? 'primary' : 'info'">
+                    {{ s.scope === 'project' ? '项目级' : '全局' }}
+                  </el-tag>
+                </div>
+                <div class="repo-desc skill-desc">{{ s.description }}</div>
+                <div v-if="s.argument_hint" class="skill-hint">参数：{{ s.argument_hint }}</div>
+                <div class="course-actions">
+                  <el-button type="primary" size="small" @click="openSkill(s)">运行</el-button>
+                </div>
+              </el-card>
+            </el-col>
+          </el-row>
+
+          <h3 class="skill-hist-title">最近执行</h3>
+          <el-table :data="skillTasks" size="small" row-key="id" stripe>
+            <el-table-column label="技能" width="150">
+              <template #default="{ row }">/{{ row.payload?.skill }}</template>
+            </el-table-column>
+            <el-table-column label="参数" min-width="160">
+              <template #default="{ row }"><span class="muted">{{ row.payload?.args || '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="状态" width="96">
+              <template #default="{ row }">
+                <el-tag size="small"
+                  :type="row.status === 'success' ? 'success' : row.status === 'running' ? 'primary' : 'danger'">
+                  {{ row.status === 'success' ? '成功' : row.status === 'running' ? '运行中' : '失败' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="进度 / 错误" min-width="240">
+              <template #default="{ row }">
+                <span :class="row.status === 'failed' ? '' : 'muted'">{{ row.error || row.progress }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="100">
+              <template #default="{ row }">
+                <el-button v-if="row.payload?.result" link type="primary" size="small"
+                  @click="showResult(row)">查看结果</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
       </el-tabs>
     </el-main>
 
@@ -303,13 +368,42 @@
         </template>
       </template>
     </el-dialog>
+
+    <!-- 技能运行参数对话框 -->
+    <el-dialog v-model="skillDialog" :title="`运行 /${currentSkill?.name}`" width="560px">
+      <p v-if="currentSkill" class="muted">{{ currentSkill.description }}</p>
+      <el-input v-model="skillArgs" :placeholder="currentSkill?.argument_hint || '参数（可空）'"
+        @keyup.enter="runSkill" />
+      <template #footer>
+        <el-button @click="skillDialog = false">取消</el-button>
+        <el-button type="primary" :loading="invoking" @click="runSkill">执行</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 技能结果对话框 -->
+    <el-dialog v-model="resultDialog" :title="`/${resultTask?.payload?.skill} 执行结果`" width="72%" top="4vh">
+      <template v-if="resultTask">
+        <div class="detail-stats">
+          <el-tag v-if="resultTask.payload?.result?.cost_usd != null" type="warning" size="small">
+            成本 ${{ (resultTask.payload.result.cost_usd || 0).toFixed(4) }}
+          </el-tag>
+          <el-tag v-if="resultTask.payload?.result?.duration_ms != null" type="info" size="small">
+            耗时 {{ Math.round((resultTask.payload.result.duration_ms || 0) / 1000) }}s
+          </el-tag>
+          <el-tag v-if="resultTask.payload?.result?.num_turns != null" size="small">
+            {{ resultTask.payload.result.num_turns }} 轮
+          </el-tag>
+        </div>
+        <pre class="result-pre">{{ resultTask.payload?.result?.result }}</pre>
+      </template>
+    </el-dialog>
   </el-container>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getConfig, getCourses, getIssues, getRepo, getRepos, getReport, getTasks, postContribute, postRefresh } from './api'
+import { getConfig, getCourses, getIssues, getRepo, getRepos, getReport, getSkills, getTasks, invokeSkill, postContribute, postRefresh } from './api'
 
 const activeTab = ref('repos')
 const repos = ref([])
@@ -333,6 +427,15 @@ const issueDifficulty = ref('')
 const issueDeepOnly = ref(false)
 const courses = ref([])
 const coursesLoading = ref(false)
+const skills = ref([])
+const skillsLoading = ref(false)
+const skillDialog = ref(false)
+const currentSkill = ref(null)
+const skillArgs = ref('')
+const invoking = ref(false)
+const skillTasks = ref([])
+const resultDialog = ref(false)
+const resultTask = ref(null)
 let pollTimer = null
 let debounceTimer = null
 
@@ -436,6 +539,50 @@ function openCourse(id, hint) {
   if (hint) ElMessage.info(hint)
 }
 
+// ---------- 技能调用 ----------
+async function loadSkills() {
+  skillsLoading.value = true
+  try {
+    skills.value = (await getSkills()).skills // 每次现拉：新增技能保存后点刷新立即可见
+  } catch (e) {
+    ElMessage.error(`加载技能失败：${e.message}`)
+  } finally {
+    skillsLoading.value = false
+  }
+}
+
+async function loadSkillTasks() {
+  try {
+    skillTasks.value = (await getTasks(30)).tasks.filter((t) => t.type === 'skill')
+  } catch { /* 忽略 */ }
+}
+
+function openSkill(s) {
+  currentSkill.value = s
+  skillArgs.value = ''
+  skillDialog.value = true
+}
+
+async function runSkill() {
+  invoking.value = true
+  try {
+    await invokeSkill(currentSkill.value.name, skillArgs.value)
+    ElMessage.success(`技能 /${currentSkill.value.name} 已提交，进度见顶部提示`)
+    skillDialog.value = false
+    loadSkillTasks()
+    startPolling(loadSkillTasks)
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    invoking.value = false
+  }
+}
+
+function showResult(t) {
+  resultTask.value = t
+  resultDialog.value = true
+}
+
 function onSelect(rows) {
   picked.value = rows.map((r) => r.id)
 }
@@ -504,6 +651,7 @@ function stopPolling() {
 watch(activeTab, (tab) => {
   if (tab === 'issues' && issues.value.length === 0) loadIssues()
   if (tab === 'learning') loadCourses() // 每次进入都刷新，/tech 生成后能看到新课程
+  if (tab === 'skills') { loadSkills(); loadSkillTasks() }
 })
 
 onMounted(async () => {
@@ -566,4 +714,18 @@ h4 { margin: 18px 0 8px; }
 .lesson-name { flex: 1; color: #24292f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lesson-score { color: #67c23a; font-weight: 600; font-size: 12px; flex-shrink: 0; }
 .course-actions { text-align: right; }
+.skill-desc { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; min-height: 3.2em; }
+.skill-hint { font-size: 12px; color: #b88230; margin-bottom: 10px; }
+.skill-hist-title { margin: 22px 0 10px; }
+.result-pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #f6f8fa;
+  border-radius: 6px;
+  padding: 14px 16px;
+  font-size: 13px;
+  font-family: Consolas, 'SFMono-Regular', Menlo, monospace;
+  max-height: 60vh;
+  overflow-y: auto;
+}
 </style>

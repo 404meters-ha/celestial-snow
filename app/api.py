@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .db import SessionLocal
-from .models import Analysis, ContributionReport, Course, Issue, QuizResult, Repo
+from .models import Analysis, ContributionReport, Course, Issue, QuizResult, Repo, TaskRun
 from .services.github_client import GitHubClient
 from .services.llm import LLMNotConfigured
 from .services.pipeline import MAX_CONTRIB_REPOS, contribution_pipeline, refresh_pipeline
@@ -221,6 +221,48 @@ def config_status():
         "user_profile": s.user_profile,
         "user_skills": [x.strip() for x in s.user_skills.split(",") if x.strip()],
     }
+
+
+# ---------- 通用技能调用 ----------
+
+@router.get("/skills")
+def skills():
+    """现扫磁盘列出可用技能（项目级 + 用户级）——新增/修改 SKILL.md 即时生效。"""
+    from .services.skill_runner import list_skills
+
+    return {"skills": list_skills()}
+
+
+class SkillInvokeRequest(BaseModel):
+    args: str = ""
+
+
+@router.post("/skills/{name}/invoke")
+async def invoke_skill(name: str, req: SkillInvokeRequest):
+    """无头执行一个 Claude Code 技能：claude -p "/<name> <args>"，进度走任务轮询。
+
+    注意必须是 async def：manager.submit 里用 asyncio.create_task，
+    同步 def 会被丢进线程池导致「no running event loop」。
+    """
+    """无头执行一个 Claude Code 技能：claude -p "/<name> <args>"，进度走任务轮询。"""
+    from .config import get_settings
+    from .services.skill_runner import list_skills, run_skill
+
+    if not any(s["name"] == name for s in list_skills()):
+        raise HTTPException(404, f"技能 {name} 不存在（检查 .claude/skills/ 或 ~/.claude/skills/）")
+    timeout = get_settings().skill_run_timeout
+
+    async def _run(task_id: str, progress) -> dict:
+        result = await run_skill(name, req.args, task_id, progress, timeout=timeout)
+        # TaskManager 不存返回值：结果自己挂到任务 payload 上，前端从 /api/tasks 取
+        with SessionLocal() as s:
+            row = s.get(TaskRun, task_id)
+            row.payload = {**(row.payload or {}), "result": result}
+            s.commit()
+        return result
+
+    task_id = manager.submit("skill", _run, payload={"skill": name, "args": req.args})
+    return {"task_id": task_id}
 
 
 # ---------- 学习闭环 ----------

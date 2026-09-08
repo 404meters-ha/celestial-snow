@@ -3,6 +3,16 @@
 > 定稿 2026-09-07（/grill-me 四轮共识）｜ 状态：✅ 已完成上线（2026-09-08 实施，全链路联调通过）
 > 本文件是唯一权威计划：开工时按此执行，改设计先改这里。
 
+## 附录 A · 通用技能宿主（2026-09-08 追加，已完成）
+
+用户追加需求：不拆解 /tech，要一种**通用**方法在平台调用各类 Claude Code 技能，且**实时生效**。
+
+- 设计：平台作为技能宿主。`GET /api/skills` 每次请求现扫 `项目/.claude/skills/` + `~/.claude/skills/` 的 SKILL.md frontmatter（不缓存 ⇒ 新增/修改技能即时生效，无需重启）；`POST /api/skills/{name}/invoke` 用 TaskManager 后台跑 `claude -p "/<name> <args>" --output-format stream-json`（cwd=项目根），工具事件实时写任务进度，最终结果（含 cost/turns）挂到任务 payload。前端新增「🛠 技能」tab（卡片 + 参数对话框 + 最近执行表 + 结果查看）。
+- 权限边界（用户拍板）：**允许清单 + 可选全放行**。`skill_run_bypass_permissions` 默认 False，走项目 `.claude/settings.json` 允许清单（Read/Write/Edit(./**) + Glob/Grep/WebFetch + Bash 的 curl/ls/cat/head/tail/wc/grep/rg/pwd）；`.env` 设 `SKILL_RUN_BYPASS_PERMISSIONS=1` 才全放行。
+- 实时生效已验证：服务运行中新增技能文件 → 下一次 GET /api/skills 即出现（57→58，无重启）。
+- 已知限制：Claude Code 会话内部（本沙箱）禁止再启动 claude.exe（防嵌套 agent，WDAC 报 WinError 786「管理员用策略规则限制」）——因此**无头调用的最终验证必须由用户从自己的终端启动服务后进行**；平台自身代码链路（发现/提交/轮询/前端）均已验证。
+- 测试技能：`/ping`（冒烟测试，含一次 Bash 工具调用验证权限链路）、`/hello`（最小技能模板，可复制改造为新技能）。
+
 ## 定位与闭环
 
 一人公司 OPS（自用，多用户预留）：调研 GitHub → 优选 issue → `/tech` 生成课程 → 平台托管学习 + quiz 反馈 → 结束。

@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     # 数据库
     db_url: str = "sqlite:///./celestial.db"
 
+    # 技能无头执行（claude -p）
+    skill_run_timeout: int = 3600  # 单次技能执行超时（秒）
+    skill_run_bypass_permissions: bool = False  # False=走 .claude/settings.json 允许清单；.env 设 1 全放行（自担风险）
+
     @property
     def llm_configured(self) -> bool:
         return bool(self.llm_base_url and self.llm_api_key)

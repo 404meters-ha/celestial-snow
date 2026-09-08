@@ -45,3 +45,6 @@ export const postCourse = (payload) => apiPost('/api/courses', payload)
 export const getCourses = () => apiGet('/api/courses')
 export const getCourse = (id) => apiGet(`/api/courses/${id}`)
 export const postQuizResult = (payload) => apiPost('/api/quiz-results', payload)
+// 通用技能调用：无头执行 Claude Code 技能（claude -p），技能文件现读即时生效
+export const getSkills = () => apiGet('/api/skills')
+export const invokeSkill = (name, args = '') => apiPost(`/api/skills/${name}/invoke`, { args })
