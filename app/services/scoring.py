@@ -1,0 +1,169 @@
+"""规则打分：可计算维度（star 增速 15% / 活跃度 15% / 维护健康度 10%），每项带理由。
+
+设计共识的六维权重：企业落地潜力 25%、匹配度 20%、star 增速 15%、活跃度 15%、
+核心思想/学习价值 15%、维护健康度 10%。本模块只算规则三维（合计 40 分封顶），
+LLM 三维由分析阶段补足——未分析的项目总分天然低于已分析的，正是想要的排序。
+"""
+import logging
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
+
+WEIGHT_STAR_MOMENTUM = 0.15
+WEIGHT_ACTIVITY = 0.15
+WEIGHT_MAINTENANCE = 0.10
+
+
+def _clamp(value: float, lo: float = 0, hi: float = 100) -> float:
+    return max(lo, min(hi, value))
+
+
+def _days_since(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
+    except ValueError:
+        return None
+
+
+def score_repo(repo: dict, *, period_stars: int = 0, period_days: int = 7) -> tuple[float, dict]:
+    """对 GitHub API 风格的 repo dict 打规则分。
+
+    repo 需含 stars/open_issues/pushed_at/contributors_count（缺的维度按 0 处理）。
+    返回 (rule_score 0-40, rule_detail)。
+    """
+    stars = int(repo.get("stars") or 0)
+    open_issues = int(repo.get("open_issues") or 0)
+    contributors = int(repo.get("contributors_count") or 0)
+    pushed_days = _days_since(repo.get("pushed_at"))
+    created_days = _days_since(repo.get("github_created_at"))
+
+    detail: dict = {}
+
+    # --- star 增速：期间增量优先，缺失用「存量/仓库年龄」估算 ---
+    momentum = period_stars
+    if momentum <= 0 and created_days and created_days > 0:
+        momentum = stars / max(created_days, 1) * period_days  # 均摊到期间
+    if stars > 0:
+        ratio = momentum / stars
+        score = _clamp(100 * min(ratio / 0.05, 1.0))  # 期间增量达存量 5% 即满分
+        reason = f"期间新增 {momentum} star（存量 {stars}，{ratio:.1%}）"
+    elif momentum > 0:
+        score = _clamp(momentum / 2)  # 新仓库无存量，纯看增量
+        reason = f"新仓库，期间新增 {momentum} star"
+    else:
+        score = 0.0
+        reason = "无 star 增量数据"
+    detail["star_momentum"] = {"score": round(score, 1), "reason": reason}
+
+    # --- 活跃度：issue 流水 + 贡献者规模 + 最近推送 ---
+    parts: list[str] = []
+    issue_score = _clamp(open_issues / 5)  # 500 个 open issues 封顶满分
+    parts.append(f"open issues {open_issues}")
+    contrib_score = _clamp(contributors / 30)  # 300 贡献者封顶
+    parts.append(f"贡献者 {contributors}")
+    activity = (issue_score + contrib_score) / 2
+    if pushed_days is not None:
+        fresh = _clamp(100 - (pushed_days - 1) * 10)  # 1 天内 100 分，之后每天 -10
+        activity = (activity * 2 + fresh) / 3
+        parts.append(f"最近推送 {pushed_days:.0f} 天前")
+    detail["activity"] = {"score": round(activity, 1), "reason": "，".join(parts)}
+
+    # --- 维护健康度：推送新鲜度 + 仓库完整度 ---
+    health_parts: list[str] = []
+    if pushed_days is not None:
+        health = _clamp(100 - (pushed_days - 3) * 5)  # 3 天内满分，之后每 5 天 -25
+        health_parts.append(f"最近推送 {pushed_days:.0f} 天前")
+    else:
+        health = 30.0
+        health_parts.append("无推送时间数据")
+    if repo.get("license"):
+        health = min(health + 10, 100)
+        health_parts.append(f"有 {repo['license']} 许可证")
+    else:
+        health_parts.append("无许可证")
+    detail["maintenance"] = {"score": round(health, 1), "reason": "，".join(health_parts)}
+
+    total = (
+        detail["star_momentum"]["score"] * WEIGHT_STAR_MOMENTUM
+        + detail["activity"]["score"] * WEIGHT_ACTIVITY
+        + detail["maintenance"]["score"] * WEIGHT_MAINTENANCE
+    )
+    return round(total, 1), detail
+
+
+def total_score(rule_detail: dict, llm_scores: dict) -> float:
+    """六维加权总分：规则三维（已存 rule_detail）+ LLM 三维（llm_scores 缺则跳过）。"""
+    llm_weights = {"enterprise_potential": 0.25, "match": 0.20, "learning_value": 0.15}
+    total = (
+        _dim(rule_detail, "star_momentum") * WEIGHT_STAR_MOMENTUM
+        + _dim(rule_detail, "activity") * WEIGHT_ACTIVITY
+        + _dim(rule_detail, "maintenance") * WEIGHT_MAINTENANCE
+    )
+    for key, weight in llm_weights.items():
+        total += _dim(llm_scores, key) * weight
+    return round(total, 1)
+
+
+def _dim(source: dict, key: str) -> float:
+    node = (source or {}).get(key) or {}
+    try:
+        return float(node.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# ---------- issue 规则预分（无 LLM 也能出 issue 排行） ----------
+
+LABEL_BOOSTS = {
+    "good first issue": 30,
+    "good-first-issue": 30,
+    "help wanted": 25,
+    "help-wanted": 25,
+    "documentation": 15,
+    "docs": 15,
+    "bug": 10,
+    "enhancement": 8,
+    "feature": 8,
+    "beginner": 20,
+    "beginner-friendly": 20,
+    "question": -10,
+    "wontfix": -50,
+}
+
+
+def issue_rule_score(issue: dict, skills: list[str]) -> tuple[float, str]:
+    """本地规则预判「这个 issue 适不适合外部贡献者、是否贴合用户技能」。
+
+    issue: {title, labels, body, comments}；返回 (0-100 分, 理由)。
+    """
+    labels = [str(lb).lower().strip() for lb in (issue.get("labels") or [])]
+    title = (issue.get("title") or "").lower()
+    body = (issue.get("body") or "").lower()
+    score = 30.0  # 底分
+    reasons: list[str] = []
+
+    for lb in labels:
+        boost = LABEL_BOOSTS.get(lb)
+        if boost:
+            score += boost
+            reasons.append(f"标签 {lb} {'+' if boost >= 0 else ''}{boost}")
+        elif "first" in lb or "beginner" in lb or "starter" in lb:
+            score += 20
+            reasons.append(f"疑似新手友好标签 {lb} +20")
+
+    matched = [s for s in skills if s and (s.lower() in title or s.lower() in body)]
+    if matched:
+        score += min(len(matched) * 12, 30)
+        reasons.append(f"命中技能关键词 {'、'.join(matched[:4])} +{min(len(matched) * 12, 30)}")
+
+    if issue.get("comments", 0) == 0:
+        score += 8  # 无人认领，机会更大
+        reasons.append("暂无评论（易认领）+8")
+    elif issue.get("comments", 0) > 15:
+        score -= 10  # 长期争论，难插入
+        reasons.append("评论过多（竞争激烈）-10")
+
+    return round(_clamp(score), 1), "；".join(reasons) or "基础分"
