@@ -72,6 +72,47 @@ def _child_env() -> dict:
     return env
 
 
+_CLI_CACHE: str | None = None  # 探测成功的 CLI 路径，进程内缓存
+
+
+async def _probe(cli: str) -> tuple[bool, str]:
+    """用 --version 试跑一次：本机策略可能拦某个二进制（如 WinError 786），跑得动才算数。"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            cli, "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=_child_env())
+        out, err = await proc.communicate()
+        if proc.returncode == 0:
+            return True, out.decode("utf-8", "replace").strip()
+        return False, f"rc={proc.returncode} {err.decode('utf-8', 'replace').strip()[:120]}"
+    except OSError as e:
+        return False, str(e)
+
+
+async def _resolve_cli() -> str:
+    """找到本机能跑的 Claude CLI：SKILL_RUN_CLI 显式指定 > claude > cc，探测通过后缓存。"""
+    global _CLI_CACHE
+    if _CLI_CACHE:
+        return _CLI_CACHE
+    from ..config import get_settings
+
+    candidates: list[str] = []
+    if get_settings().skill_run_cli:
+        candidates.append(get_settings().skill_run_cli)
+    for name in ("claude", "cc"):
+        found = shutil.which(name)
+        if found and found not in candidates:
+            candidates.append(found)
+    errors: list[str] = []
+    for c in candidates:
+        ok, detail = await _probe(c)
+        if ok:
+            _CLI_CACHE = c
+            return c
+        errors.append(f"{c} → {detail}")
+    raise RuntimeError("没有可用的 Claude CLI。探测记录：" + "；".join(errors))
+
+
 async def run_skill(name: str, args: str, task_id: str, progress, timeout: int = 3600) -> dict:
     """无头执行一个技能，stream-json 事件实时转成任务进度。
 
@@ -79,9 +120,8 @@ async def run_skill(name: str, args: str, task_id: str, progress, timeout: int =
     """
     from ..config import get_settings
 
-    claude = shutil.which("claude")
-    if not claude:
-        raise RuntimeError("未找到 claude CLI（PATH 里没有 claude），无法无头执行技能")
+    claude = await _resolve_cli()
+    progress(f"使用 CLI：{claude}")
 
     cmd = [claude, "-p", f"/{name} {args}".strip(), "--output-format", "stream-json", "--verbose"]
     if get_settings().skill_run_bypass_permissions:
