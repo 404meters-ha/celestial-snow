@@ -21,7 +21,8 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `POST /api/industries/parse` `{"text": "agent运行时 pi deer-flow"}` — 行业分析输入解析（同步 2-5 秒）：LLM 拆「方向 vs 项目名」，
   方向经标签库归一给 canonical，项目名 GitHub 定位出候选清单——前端确认面板的数据源
 - `POST /api/industries` `{"directions": [{"raw": "agent运行时", "tag": "Agent运行时"}], "repos": ["bytedance/deer-flow"]}` — 确认后的多方向分析
-  （任务类型 `industry`，方向串行跑；种子项目并入各方向候选与报告，项目名本身不打成标签）；报告看 `GET /api/industries`（列表）/ `GET /api/industries/{id}`（含 `overview_md` 与项目分类清单）
+  （任务类型 `industry`，方向串行跑；种子项目并入各方向候选与报告，项目名本身不打成标签）；报告看 `GET /api/industries`（列表）/ `GET /api/industries/{id}`（含 `overview_md` 与项目分类清单）；
+  `DELETE /api/industries/{id}` 删一份报告（只删报告记录，`repos.tags` 是累积知识不动）
 - `GET /api/learning-context/{issue_id}` — 一次取全：issue + 仓库元数据 + README + 贡献报告深读段（深度分析/生成课程用这个）
 - `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到卡奥斯 OSS，返回 `entry_url` 等清单
   （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件）

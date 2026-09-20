@@ -361,6 +361,18 @@ def list_industries():
         }
 
 
+@router.delete("/industries/{industry_id}")
+def delete_industry(industry_id: int):
+    """删除一份行业报告（只删报告记录；repos.tags 是累积的知识，不动）。"""
+    with SessionLocal() as session:
+        row = session.get(IndustryReport, industry_id)
+        if row is None:
+            raise HTTPException(404, "行业报告不存在")
+        session.delete(row)
+        session.commit()
+    return {"ok": True}
+
+
 class IndustryParseRequest(BaseModel):
     text: str
 
