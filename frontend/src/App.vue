@@ -78,7 +78,8 @@
               <el-radio-button value="rule">规则分</el-radio-button>
               <el-radio-button value="stars">Star 数</el-radio-button>
             </el-radio-group>
-            <el-select v-model="tagFilter" clearable filterable placeholder="标签" class="tag-select" @change="resetRepoPage">
+            <el-select v-model="tagFilter" multiple clearable filterable collapse-tags collapse-tags-tooltip
+              placeholder="标签（多选交集）" class="tag-select" @change="resetRepoPage">
               <el-option v-for="t in tagOptions" :key="t.tag" :value="t.tag" :label="`${t.tag}（${t.count}）`" />
             </el-select>
             <el-input v-model="q" placeholder="搜索项目名 / 描述" clearable class="search" @input="debouncedLoad" />
@@ -291,15 +292,47 @@
           </template>
 
           <el-alert type="info" :closable="false" show-icon class="task-alert"
-            title="输入行业/方向词，LLM 规划关键词 → GitHub 检索 + 代表项目解析 → 生成行业开源格局报告；项目入库并打上行业标签，已有项目也会自动匹配" />
+            title="自由输入方向词和项目名（可混合），先解析确认再分析：方向 → LLM 调研开源格局并打行业标签；项目名 → 直接入库并入报告，项目名本身不会成为标签" />
 
           <div class="toolbar">
-            <el-input v-model="industryInput" placeholder="行业 / 方向词，如：生成视频、向量数据库、AI 编程助手"
+            <el-input v-model="industryInput" placeholder="方向词 + 项目名随意混输，如：agent运行时 pi agentScope-java deer-flow"
               clearable class="industry-input" @keyup.enter="runIndustry" />
-            <el-button type="primary" :loading="industryRunning" @click="runIndustry">开始定向分析</el-button>
+            <el-button type="primary" :loading="industryParsing" @click="runIndustry">解析输入</el-button>
             <el-button :loading="tagging" @click="runAutoTag">一键给全部项目打标签</el-button>
-            <span class="picked-hint">分析 2-5 分钟，进度见顶部面板</span>
+            <span class="picked-hint">解析 2-5 秒，分析 2-5 分钟</span>
           </div>
+
+          <el-dialog v-model="parseDialog" title="确认解析结果" width="680px">
+            <div v-if="parseResult">
+              <div class="parse-section">方向（勾选保留，标签经标签库归一）</div>
+              <div v-for="d in parseResult.directions" :key="d.raw" class="parse-row">
+                <el-checkbox v-model="d.keep" />
+                <span class="parse-raw">{{ d.raw }}</span>
+                <span class="muted">→</span>
+                <el-tag size="small">{{ d.tag }}</el-tag>
+              </div>
+              <div v-if="!parseResult.directions.length" class="muted parse-row">（没有识别出方向）</div>
+              <div class="parse-section">项目（点名入库并入报告；下拉可换定位到的仓库）</div>
+              <div v-for="r in parseResult.repos" :key="r.raw" class="parse-row">
+                <el-checkbox v-model="r.keep" :disabled="!r.candidates.length" />
+                <span class="parse-raw">{{ r.raw }}</span>
+                <el-select v-if="r.candidates.length" v-model="r.selected" filterable size="small"
+                  class="parse-select" placeholder="选择仓库">
+                  <el-option v-for="c in r.candidates" :key="c.full_name" :value="c.full_name"
+                    :label="`${c.full_name}（⭐${(c.stars || 0).toLocaleString()}）`">
+                    <span>{{ c.full_name }} ⭐{{ (c.stars || 0).toLocaleString() }}</span>
+                    <span class="parse-cand-desc">{{ c.description }}</span>
+                  </el-option>
+                </el-select>
+                <span v-else class="muted">未找到候选（将跳过）</span>
+              </div>
+              <div v-if="!parseResult.repos.length" class="muted parse-row">（没有识别出项目名）</div>
+            </div>
+            <template #footer>
+              <el-button @click="parseDialog = false">取消</el-button>
+              <el-button type="primary" :loading="industryRunning" @click="confirmIndustry">开始分析</el-button>
+            </template>
+          </el-dialog>
 
           <el-empty v-if="!industriesLoading && industries.length === 0"
             description="还没有行业分析——输入一个方向词（如「生成视频」），让 LLM 帮你摸清这个领域的开源格局" />
@@ -641,7 +674,7 @@ import { ElMessage } from 'element-plus'
 import {
   getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos,
   getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag,
-  postContribute, postIndustry, postRefresh, postTranslate, runAgent,
+  postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate, runAgent,
 } from './api'
 
 const activeTab = ref('repos')
@@ -657,7 +690,7 @@ const analyzedFilter = ref('all')
 const repoPage = ref(1)
 const repoPageSize = ref(20)
 const repoTotal = ref(0)
-const tagFilter = ref('')
+const tagFilter = ref([])
 const tagOptions = ref([])
 const issueAnalyzed = ref('all')
 const issuePage = ref(1)
@@ -666,6 +699,9 @@ const issueTotal = ref(0)
 // 行业洞察
 const industryInput = ref('')
 const industryRunning = ref(false)
+const industryParsing = ref(false)
+const parseDialog = ref(false)
+const parseResult = ref(null)
 const industries = ref([])
 const industriesLoading = ref(false)
 const industryVisible = ref(false)
@@ -942,10 +978,10 @@ async function loadTags() {
   } catch { /* 忽略：标签加载失败不阻塞榜单 */ }
 }
 
-/** 行内标签点击 → 项目榜按该标签筛选并跳过去 */
+/** 行内标签点击 → 项目榜按该标签筛选并跳过去（多选模式：点谁换谁） */
 function filterTag(tag) {
   activeTab.value = 'repos'
-  tagFilter.value = tag
+  tagFilter.value = [tag]
   resetRepoPage()
 }
 
@@ -960,13 +996,40 @@ async function loadIndustries() {
   }
 }
 
+/** 行业分析两段式：先解析（方向 + 项目候选），确认面板里删/换之后再跑 */
 async function runIndustry() {
-  const name = industryInput.value.trim()
-  if (!name) return
+  const text = industryInput.value.trim()
+  if (!text) return
+  industryParsing.value = true
+  try {
+    const data = await postIndustryParse(text)
+    parseResult.value = {
+      directions: (data.directions || []).map((d) => ({ ...d, keep: true })),
+      repos: (data.repos || []).map((r) => ({ ...r, keep: true })),
+    }
+    parseDialog.value = true
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    industryParsing.value = false
+  }
+}
+
+async function confirmIndustry() {
+  const directions = (parseResult.value?.directions || []).filter((d) => d.keep)
+  const repos = (parseResult.value?.repos || []).filter((r) => r.keep && r.selected).map((r) => r.selected)
+  if (!directions.length) {
+    ElMessage.warning('至少保留一个方向')
+    return
+  }
   industryRunning.value = true
   try {
-    const { task_id: taskId } = await postIndustry(name)
-    ElMessage.success(`「${name}」定向分析已提交，进度见顶部面板`)
+    const { task_id: taskId } = await postIndustryRuns({
+      directions: directions.map(({ raw, tag }) => ({ raw, tag })),
+      repos,
+    })
+    ElMessage.success(`${directions.length} 个方向的分析已提交，进度见顶部面板`)
+    parseDialog.value = false
     industryInput.value = ''
     focusTask(taskId, () => {
       loadIndustries()
@@ -1396,6 +1459,12 @@ body { margin: 0; background: #f6f8fa; font-family: system-ui, 'Microsoft YaHei'
 .repo-name { font-weight: 600; color: #24292f; text-decoration: none; }
 .repo-name:hover { color: #409eff; }
 .repo-desc { color: #8a919f; font-size: 12px; margin-top: 2px; }
+.parse-section { font-size: 13px; font-weight: 600; color: #4a5160; margin: 10px 0 6px; }
+.parse-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+.parse-raw { min-width: 90px; font-size: 13px; }
+.parse-select { flex: 1; }
+.parse-cand-desc { color: #8a919f; font-size: 12px; margin-left: 8px; max-width: 260px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .repo-age { color: #8a919f; font-size: 12px; }
 .repo-push { color: #4a5160; font-size: 12px; margin-top: 2px; }
 .repo-push.stale { color: #e6a23c; }

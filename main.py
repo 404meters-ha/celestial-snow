@@ -53,6 +53,7 @@ async def _warm_agent_sdk() -> None:
 async def lifespan(app: FastAPI):
     init_db()
     _fail_orphan_tasks()
+    _maybe_cleanup_tags()
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     from apscheduler.triggers.cron import CronTrigger
 
@@ -81,6 +82,23 @@ def _fail_orphan_tasks() -> None:
             .values(status="failed", error="服务重启，任务中断", finished_at=datetime.now(timezone.utc))
         )
         session.commit()
+
+
+def _maybe_cleanup_tags() -> None:
+    """脏标签一次性清洗：有脏特征（含 '/' 的整串标签）且从未成功清洗过（哨兵）才提交。
+
+    成功一次永不重跑；失败不落哨兵，下次启动重试（脏特征还在才会试，不空转）。
+    """
+    from app.services.tags import cleanup_done, cleanup_pipeline, has_dirty_tags
+    from app.tasks import manager
+
+    try:
+        if not has_dirty_tags() or cleanup_done():
+            return
+        logger.info("检测到历史脏标签，提交一次性清洗任务")
+        manager.submit("tag_cleanup", cleanup_pipeline)
+    except Exception:  # noqa: BLE001 清洗是锦上添花，绝不能影响启动
+        logger.warning("脏标签清洗检测失败", exc_info=True)
 
 
 app = FastAPI(title="celestial-snow", lifespan=lifespan)

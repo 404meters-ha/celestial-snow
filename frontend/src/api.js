@@ -31,7 +31,8 @@ export const getRepos = (params = {}) => {
   if (params.offset) qs.set('offset', params.offset)
   if (params.analyzed && params.analyzed !== 'all') qs.set('analyzed', params.analyzed)
   if (params.period) qs.set('period', params.period)
-  if (params.tag) qs.set('tag', params.tag)
+  if (Array.isArray(params.tag)) params.tag.forEach((t) => qs.append('tag', t))
+  else if (params.tag) qs.set('tag', params.tag)
   return apiGet(`/api/repos?${qs}`)
 }
 export const getRepo = (fullName) => apiGet(`/api/repos/${fullName}`)
@@ -64,7 +65,9 @@ export const getTags = () => apiGet('/api/tags')
 export const postAutoTag = () => apiPost('/api/tags/auto')
 export const getIndustries = () => apiGet('/api/industries')
 export const getIndustry = (id) => apiGet(`/api/industries/${id}`)
-export const postIndustry = (name) => apiPost('/api/industries', { name })
+// 两段式：先解析（确认面板数据源），确认后跑多方向分析
+export const postIndustryParse = (text) => apiPost('/api/industries/parse', { text })
+export const postIndustryRuns = (payload) => apiPost('/api/industries', payload)
 // 学习闭环：/tech 取上下文、注册课程；课程 HTML 静态托管在 /courses/{id}/
 export const getLearningContext = (issueId) => apiGet(`/api/learning-context/${issueId}`)
 export const postCourse = (payload) => apiPost('/api/courses', payload)

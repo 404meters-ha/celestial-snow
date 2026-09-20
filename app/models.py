@@ -51,6 +51,22 @@ class Repo(Base):
     issues: Mapped[list["Issue"]] = relationship(back_populates="repo")
 
 
+class Tag(Base):
+    """标签库：canonical 名（一律中文，专有名词除外）+ 别名（英文原词/缩写/其他叫法）。
+
+    所有写 repos.tags 的路径（行业分析、全量打标、清洗）都先到这里归一——
+    alias/canonical 精确命中直接映射，未命中的经 LLM 只做翻译级同义合并。
+    """
+
+    __tablename__ = "tags"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    aliases: Mapped[list] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(32), default="")  # industry | tagging | cleanup
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Snapshot(Base):
     """每日 star 快照，用于计算真实 7 天 / 30 天增量（自建周榜/月榜的核心）。"""
 

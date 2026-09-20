@@ -195,6 +195,25 @@ async def summarize_issues(llm: LLMClient, issues: list[dict]) -> dict[int, dict
 
 # ---------- 定向行业分析 ----------
 
+PARSE_INPUT_SYSTEM = """你是开源项目情报站的输入解析器。用户在行业分析框里输入一段自由文本，其中可能混合「技术方向」和「具体项目名」。把它拆解开，输出严格 JSON（不要 markdown 围栏）：
+{
+  "directions": [{"raw": "原文片段", "canonical": "规范中文方向名（专有名词除外）"}],
+  "repos": [{"raw": "原文片段", "full_name": "你确信的 owner/repo；不确定就给空字符串"}]
+}
+判断规则：
+- 技术方向：一类技术/行业的统称（agent运行时、oauth2、向量数据库），平台会围绕它做行业调研 → 进 directions
+- 具体项目名：某个 GitHub 仓库的名字或名字片段（pi、agentScope-java、deer-flow）→ 进 repos；
+  结合语境判断——"pi" 单独出现难说，出现在 "agent运行时" 旁边大概率是项目名
+- canonical 优先复用【标签库】里的已有写法（意思相同就原样用，避免同义标签）；库里没有才新拟
+- 方向 0-3 个、项目 0-5 个；实在两不像的片段归 directions（默认用户想调研它）"""
+
+NORMALIZE_SYSTEM = """你是标签词表管理员。给定新词清单和现有标签库，判断哪些新词是某个现有标签的同义说法。只做两类合并：
+1. 纯翻译级同义：中英对照（"AI" vs "人工智能"、"Agent 框架" vs "agent framework"）
+2. 明显缩写全称："LLM" vs "大语言模型"
+其余一律不合并——字面相近但含义有别（"推理框架" vs "推理引擎"）、粒度不同（"AI" vs "AI 视频生成"）都必须保持独立。
+输出严格 JSON（不要 markdown 围栏）：{"words": [{"word": "新词", "tag": "现有标签名"}]}
+只报你非常确定的（思考后仍有犹豫就不报）；一个都不可并就返回 {"words": []}。"""
+
 INDUSTRY_PLAN_SYSTEM = """你是开源领域情报专家。用户给出一个行业/技术方向词，你负责规划一次开源项目调研，输出严格 JSON（不要 markdown 围栏）：
 {
   "definition": "这个行业/方向是什么、当前处于什么阶段（80字内）",
@@ -217,7 +236,8 @@ projects 必须覆盖候选清单里值得关注的全部项目（可剔除明�
 
 TAXONOMY_SYSTEM = """你是开源项目分类专家。给定一批 GitHub 项目（名称/描述/话题/语言），提出一套覆盖它们的中文行业分类体系，输出严格 JSON（不要 markdown 围栏）：
 {"categories": ["分类名，8-15个，粒度适中（如：AI 视频生成、LLM 应用框架、数据湖、前端框架、DevOps 工具），相互尽量不重叠"]}
-分类要让任何一个项目都能找到归属，可含一个「其他 / 杂项」兜底。"""
+分类要让任何一个项目都能找到归属，可含一个「其他」兜底（分类名不要带斜杠）。
+若提供了【已有标签库】，意思相同的分类必须原样复用库内写法（禁止另造同义新词，如库里有「人工智能」就不要再提「AI 技术」）；库覆盖不到的才新拟。"""
 
 CLASSIFY_SYSTEM = """你是开源项目分类器。给定候选分类和一批项目，给每个项目打 1-3 个最贴切的分类标签，输出严格 JSON（不要 markdown 围栏）：
 {"items": [{"full_name": "owner/repo", "tags": ["从候选分类中选，1-3个；确实都不合适才用「其他」"]}]}
@@ -240,6 +260,36 @@ async def translate_descriptions(llm: LLMClient, repos: list[dict]) -> dict[str,
     }
 
 
+async def parse_industry_input(llm: LLMClient, text: str, known_tags: list[str]) -> dict:
+    """自由文本 → {directions: [{raw, canonical}], repos: [{raw, full_name}]}。"""
+    user = f"【标签库】{json.dumps(known_tags, ensure_ascii=False)}\n\n用户输入：{text}"
+    data = await llm.chat_json(PARSE_INPUT_SYSTEM, user, max_tokens=1000)
+    directions = [
+        {"raw": str(d.get("raw", "")).strip(), "canonical": str(d.get("canonical", "")).strip() or str(d.get("raw", "")).strip()}
+        for d in data.get("directions", []) if str(d.get("raw", "")).strip()
+    ]
+    repos = [
+        {"raw": str(r.get("raw", "")).strip(), "full_name": str(r.get("full_name", "")).strip()}
+        for r in data.get("repos", []) if str(r.get("raw", "")).strip()
+    ]
+    return {"directions": directions, "repos": repos}
+
+
+async def normalize_tags(llm: LLMClient, words: list[str], existing_tags: list[str]) -> dict[str, str]:
+    """新词 → 现有标签的合并映射（只含高置信同义；没判中的词不在结果里，由调用方新建）。"""
+    user = (
+        f"【现有标签库】{json.dumps(existing_tags, ensure_ascii=False)}\n\n"
+        f"【新词清单】{json.dumps(words, ensure_ascii=False)}"
+    )
+    data = await llm.chat_json(NORMALIZE_SYSTEM, user, max_tokens=1000)
+    return {
+        str(w["word"]): str(w["tag"])
+        for w in data.get("words", [])
+        if str(w.get("word", "")).strip() and str(w.get("tag", "")).strip()
+    }
+
+
+
 async def plan_industry(llm: LLMClient, industry: str, profile: str) -> dict:
     """行业调研规划：定义 + 子方向 + 搜索关键词 + 代表项目。"""
     user = f"行业/方向词：{industry}\n\n{PROFILE_NOTE.format(profile=profile)}"
@@ -257,9 +307,10 @@ async def report_industry(llm: LLMClient, industry: str, profile: str, plan: dic
     return await llm.chat_json(INDUSTRY_REPORT_SYSTEM, user, max_tokens=6000)
 
 
-async def propose_taxonomy(llm: LLMClient, repos: list[dict]) -> list[str]:
-    """全量项目的分类体系提案（打标签第一步）。"""
-    user = json.dumps(repos, ensure_ascii=False)
+async def propose_taxonomy(llm: LLMClient, repos: list[dict], known_tags: list[str] | None = None) -> list[str]:
+    """全量项目的分类体系提案（打标签第一步）。known_tags 非空时优先复用库内已有标签。"""
+    note = f"【已有标签库（意思相同的分类必须原样复用）】{json.dumps(known_tags, ensure_ascii=False)}\n\n" if known_tags else ""
+    user = note + json.dumps(repos, ensure_ascii=False)
     data = await llm.chat_json(TAXONOMY_SYSTEM, user, max_tokens=1500)
     return [str(c) for c in data.get("categories", []) if str(c).strip()]
 
