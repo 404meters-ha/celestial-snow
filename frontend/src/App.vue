@@ -122,6 +122,21 @@
             <el-table-column label="Star" width="100" sortable :sort-by="'stars'">
               <template #default="{ row }">⭐ {{ row.stars.toLocaleString() }}</template>
             </el-table-column>
+            <el-table-column label="建立 / 活跃" width="125">
+              <template #default="{ row }">
+                <el-tooltip v-if="row.github_created_at || row.pushed_at" placement="top" :show-after="400">
+                  <template #content>
+                    <div>建立：{{ fmtTime(row.github_created_at) || '未知' }}</div>
+                    <div>最近 push：{{ fmtTime(row.pushed_at) || '未知' }}</div>
+                  </template>
+                  <div>
+                    <div class="repo-age">建于 {{ fmtAgo(row.github_created_at) }}</div>
+                    <div class="repo-push" :class="{ stale: pushDays(row) > 90 }">push {{ fmtAgo(row.pushed_at) }}</div>
+                  </div>
+                </el-tooltip>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
             <el-table-column label="综合分" width="100" sortable :sort-by="'total_score'">
               <template #default="{ row }">
                 <el-tag :type="scoreType(row.total_score)">{{ row.total_score }}</el-tag>
@@ -1039,6 +1054,25 @@ function fmtTime(iso) {
   return Number.isNaN(ms) ? '' : new Date(ms).toLocaleString('zh-CN', { hour12: false })
 }
 
+/** 相对时间（月按 30 天近似）：今天 / 3 天前 / 2 个月前 / 1 年前 */
+function fmtAgo(iso) {
+  if (!iso) return '—'
+  const ms = parseUTC(iso)
+  if (Number.isNaN(ms)) return '—'
+  const days = Math.max(0, Math.floor((Date.now() - ms) / 86400000))
+  if (days === 0) return '今天'
+  if (days < 30) return `${days} 天前`
+  if (days < 365) return `${Math.floor(days / 30)} 个月前`
+  return `${Math.floor(days / 365)} 年前`
+}
+
+/** 距最近 push 的天数；无数据返回 -1（不算停更） */
+function pushDays(row) {
+  if (!row.pushed_at) return -1
+  const ms = parseUTC(row.pushed_at)
+  return Number.isNaN(ms) ? -1 : Math.floor((Date.now() - ms) / 86400000)
+}
+
 async function analyzeSelected() {
   analyzing.value = true
   try {
@@ -1362,6 +1396,9 @@ body { margin: 0; background: #f6f8fa; font-family: system-ui, 'Microsoft YaHei'
 .repo-name { font-weight: 600; color: #24292f; text-decoration: none; }
 .repo-name:hover { color: #409eff; }
 .repo-desc { color: #8a919f; font-size: 12px; margin-top: 2px; }
+.repo-age { color: #8a919f; font-size: 12px; }
+.repo-push { color: #4a5160; font-size: 12px; margin-top: 2px; }
+.repo-push.stale { color: #e6a23c; }
 .repo-attr { color: #409eff; margin-right: 8px; }
 .label-tag { margin-right: 4px; }
 .issue-summary { font-size: 13px; color: #24292f; }
