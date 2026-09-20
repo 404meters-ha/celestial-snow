@@ -11,7 +11,7 @@ __pycache__/
 *.db-shm
 *.db-wal
 frontend/node_modules/
-frontend/dist/
+# frontend/dist 入库：服务器 git clone 即可直接启动（构建产物 1.4M，改版后重新 build+commit）
 courses/
 
 # vendored cc-mini 的运行时状态（技能缓存等，可再生）
