@@ -191,7 +191,7 @@ class Course(Base):
 
     lessons JSON：[{"lesson_id": "01-overview", "title": "...", "file": "01-overview.html",
     "quiz_count": 4}]——quiz 进度按 lesson_id 与 quiz_results 对账。
-    publish JSON：最近一次发布到卡奥斯 OSS 的清单（文件夹、入口 URL、文件列表、时间）。
+    publish JSON：最近一次发布到服务器目录的清单（文件夹、入口 URL、文件列表、时间）。
     """
 
     __tablename__ = "courses"
@@ -203,7 +203,7 @@ class Course(Base):
     title: Mapped[str] = mapped_column(String(512), default="")
     lessons: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), default="learning")  # learning|done
-    publish: Mapped[dict] = mapped_column(JSON, default=dict)  # 最近一次 OSS 发布清单
+    publish: Mapped[dict] = mapped_column(JSON, default=dict)  # 最近一次发布清单
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     repo: Mapped[Repo] = relationship()

@@ -268,7 +268,7 @@ class WriteFileTool(Tool):
 
 
 class PlatformApiTool(Tool):
-    """调用平台自身的 REST API：注册课程、取学习上下文、发布到 OSS 等都走它（替代本地 curl）。"""
+    """调用平台自身的 REST API：注册课程、取学习上下文、发布课程副本等都走它（替代本地 curl）。"""
 
     @property
     def name(self) -> str:

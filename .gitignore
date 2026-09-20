@@ -17,6 +17,9 @@ courses/
 # vendored cc-mini 的运行时状态（技能缓存等，可再生）
 .cc-mini/
 
+# 课程发布目录（LOCAL_PUBLISH_DIR 的落盘产物，可随时重新发布）
+published/
+
 # IDE
 .idea/
 

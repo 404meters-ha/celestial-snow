@@ -1,23 +1,22 @@
-"""把 /tech 生成的课程目录发布到卡奥斯 OSS。
+"""把 /tech 生成的课程目录发布到服务器本地磁盘（LOCAL_PUBLISH_DIR，默认 ./published）。
 
-本地目录 courses/{id}/ 是按 slug 命名的（01-overview.html），直接传上去在 OSS 里没法看。这里做三件事：
+本地目录 courses/{id}/ 是按 slug 命名的（01-overview.html），直接落盘在发布目录里没法看。这里做三件事：
 
 1. **分文件夹**：整门课进 `{course_id}-{repo}-issue{n}-{课程标题}/`，同名课程互不干扰。
 2. **重命名成可理解的**：课件文件用注册课程时的中文课标题命名（01-overview.html → 01-项目导览.html），
    index.html → 00-课程目录.html；assets/ 与 reference/ 保持原路径（web 约定，改名只会徒增坏链风险）。
 3. **改写链接**：页面之间是用相对链接互指的（index.html → 01-overview.html），改名后必须同步改写
-   href/src，否则 OSS 上的导航全断。
+   href/src，否则发布目录里的导航全断。
 
 顺带在静态副本里注入 `window.CELESTIAL_PUBLISHED = true`：quiz.js 据此说明「静态副本不计入平台进度」——
-OSS 上的页面调不到 localhost:8100，否则会显示成「平台未启动」的误导提示。
+发布目录的页面调不到平台 API，否则会显示成「平台未启动」的误导提示。
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-from ..config import get_settings
-from . import oss
+from . import store
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -38,7 +37,7 @@ def safe_name(text: str, fallback: str = "untitled", max_len: int = 80) -> str:
     """把标题变成可安全用于文件名/key 的名字。
 
     三类字符要处理：文件系统非法字符（/ : * ? 等）、URL 路径需转义字符（% [ ] 等）、
-    以及 '#'——它是 URL 片段分隔符，留在文件名里链接会被浏览器截断（实测 OSS 上 403）。
+    以及 '#'——它是 URL 片段分隔符，留在文件名里链接会被浏览器截断（实测链接直接断掉）。
     '#' 直接删掉而非换成 '-'，因为课标题里的它几乎都写作「issue #4686」，删掉才读得顺。
     """
     name = (text or "").replace("#", "")
@@ -55,14 +54,12 @@ def course_dir_for(course_id: int) -> Path:
 
 
 def key_root_for(course) -> str:
-    """对象 key 前缀：{key_prefix}/{folder}/（专用桶无需 key_prefix）。"""
-    prefix = get_settings().hyida_obs_key_prefix.strip("/")
-    folder = folder_name(course)
-    return f"{prefix}/{folder}/" if prefix else f"{folder}/"
+    """发布目录下的课程子目录（作为 key 前缀）：{folder}/。"""
+    return f"{folder_name(course)}/"
 
 
 def folder_name(course) -> str:
-    """课程在 OSS 上的文件夹名：{id}-{repo}-issue{n}-{标题}。"""
+    """课程在发布目录里的文件夹名：{id}-{repo}-issue{n}-{标题}。"""
     repo_name = (course.repo.full_name if course.repo else "").split("/")[-1] or "repo"
     issue_no = course.issue.number if course.issue else None
     parts = [str(course.id), safe_name(repo_name, "repo", 40)]
@@ -137,9 +134,9 @@ def _transform(rel_dst: str, data: bytes, renames: dict[str, str]) -> bytes:
 
 
 def publish_course(course, course_dir: Path | None = None, prune: bool = False) -> dict:
-    """把课程目录整体发布到 OSS，返回上传清单。
+    """把课程目录整体落盘到发布目录，返回发布清单。
 
-    prune=True 时删除该课程文件夹下本次未上传的旧对象（重生成课程后清理残留文件）。
+    prune=True 时删除该课程文件夹下本次未写入的旧文件（重生成课程后清理残留）。
     """
     course_dir = Path(course_dir) if course_dir else course_dir_for(course.id)
     if not course_dir.is_dir():
@@ -147,7 +144,6 @@ def publish_course(course, course_dir: Path | None = None, prune: bool = False) 
 
     renames = lesson_renames(course)
     key_root = key_root_for(course)
-    settings = get_settings()
     files: list[dict] = []
 
     for src in sorted(course_dir.rglob("*")):
@@ -156,7 +152,7 @@ def publish_course(course, course_dir: Path | None = None, prune: bool = False) 
         rel_src = src.relative_to(course_dir).as_posix()
         if any(part.startswith(".") for part in src.relative_to(course_dir).parts):
             continue
-        # 只有顶层课件文件改名；子目录（assets/ reference/ learning-records/）按原路径上传
+        # 只有顶层课件文件改名；子目录（assets/ reference/ learning-records/）按原路径写入
         rel_dst = renames[rel_src] if "/" not in rel_src and rel_src in renames else rel_src
         try:
             data = _transform(rel_dst, src.read_bytes(), renames)
@@ -164,7 +160,7 @@ def publish_course(course, course_dir: Path | None = None, prune: bool = False) 
             # 带上文件名，否则只看到一段 codec 报错不知道是哪一课
             raise ValueError(f"{rel_src} 不是 UTF-8 编码，无法改写链接：{exc}") from exc
         key = key_root + rel_dst
-        url = oss.put_bytes(key, data, oss.content_type_for(rel_dst))
+        url = store.put_bytes(key, data)
         files.append({
             "source": rel_src,
             "key": key,
@@ -177,9 +173,9 @@ def publish_course(course, course_dir: Path | None = None, prune: bool = False) 
     pruned: list[str] = []
     if prune:
         current = {f["key"] for f in files}
-        for key in oss.list_prefix(key_root):
+        for key in store.list_prefix(key_root):
             if key not in current:
-                oss.delete_key(key)
+                store.delete_key(key)
                 pruned.append(key)
 
     entry = next((f for f in files if f["name"] == _INDEX_NAME), None)
@@ -187,8 +183,8 @@ def publish_course(course, course_dir: Path | None = None, prune: bool = False) 
     return {
         "folder": key_root.rstrip("/").split("/")[-1],
         "key_root": key_root,
-        "bucket": settings.hyida_obs_bucket,
-        "endpoint": settings.hyida_obs_endpoint,
+        "storage": "local-disk",
+        "dir": str(store.root()),
         "entry_url": entry["url"] if entry else "",
         "files": files,
         "file_count": len(files),

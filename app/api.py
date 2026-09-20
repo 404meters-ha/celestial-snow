@@ -21,7 +21,8 @@ from .models import (
     TaskRun,
     utcnow,
 )
-from .services import course_publish, oss, scoring
+from .services import course_publish, scoring
+from .services.store import StoreError
 from .services.github_client import GitHubClient
 from .services.industry import industry_pipeline, tagging_pipeline
 from .services.llm import LLMNotConfigured
@@ -672,7 +673,7 @@ def learning_context(issue_id: int):
 def _course_view(session, course: Course, full: bool = False) -> dict:
     """课程视图：lessons 摊平并附每节 quiz 提交进度。
 
-    full=True 时附带 OSS 发布的逐文件明细（详情页用；列表里不带，避免每门课都驮一份清单）。
+    full=True 时附带发布的逐文件明细（详情页用；列表里不带，避免每门课都驮一份清单）。
     """
     results = session.scalars(
         select(QuizResult).where(QuizResult.course_id == course.id)
@@ -709,7 +710,7 @@ def _course_view(session, course: Course, full: bool = False) -> dict:
         "lessons": lessons,
         "done_lessons": sum(1 for l in lessons if l["submitted"]),
         "total_lessons": len(lessons),
-        # OSS 发布状态（逐文件明细只在详情里带）
+        # 发布状态（逐文件明细只在详情里带）
         "published": bool(pub.get("entry_url")),
         "publish": publish or None,
     }
@@ -784,17 +785,12 @@ class CoursePublish(BaseModel):
 
 @router.post("/courses/{course_id}/publish")
 def publish_course(course_id: int, req: CoursePublish | None = None):
-    """把 courses/{id}/ 发布到卡奥斯 OSS。
+    """把 courses/{id}/ 发布到服务器本地磁盘（LOCAL_PUBLISH_DIR）。
 
     按课程分文件夹（{id}-{repo}-issue{n}-{课程标题}/），课件文件用中文课标题重命名，
     页面之间的相对链接同步改写，静态副本额外注入 CELESTIAL_PUBLISHED 标记。
     同 key 覆盖，可重复执行；失败如实报错，不写入半成品发布记录。
     """
-    if not oss.is_enabled():
-        raise HTTPException(
-            503,
-            "卡奥斯 OSS 未配置：请在 .env 填 HYIDA_OBS_ACCESS_KEY / HYIDA_OBS_SECRET_KEY 等并置 HYIDA_OBS_ENABLED=1",
-        )
     prune = bool(req.prune) if req else False
     with SessionLocal() as session:
         course = session.get(Course, course_id)
@@ -804,10 +800,10 @@ def publish_course(course_id: int, req: CoursePublish | None = None):
             manifest = course_publish.publish_course(course, prune=prune)
         except FileNotFoundError as exc:
             raise HTTPException(404, str(exc)) from exc
-        except oss.OSSNotConfigured as exc:
-            raise HTTPException(503, str(exc)) from exc
-        except Exception as exc:  # noqa: BLE001 OSS 侧异常原样转达，便于排查网络/权限
-            raise HTTPException(502, f"OSS 上传失败：{exc}") from exc
+        except StoreError as exc:  # noqa: BLE001 磁盘侧异常原样转达，便于排查权限/空间
+            raise HTTPException(502, f"发布目录写入失败：{exc}") from exc
+        except Exception as exc:
+            raise HTTPException(502, f"发布失败：{exc}") from exc
         manifest["published_at"] = utcnow().isoformat()
         course.publish = manifest
         session.commit()

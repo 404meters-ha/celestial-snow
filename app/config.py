@@ -38,20 +38,10 @@ class Settings(BaseSettings):
     # PlatformAPI 工具访问的本服务地址（云端部署时改成对外域名）
     platform_api_base: str = "http://127.0.0.1:8100"
 
-    # 卡奥斯 OSS（对应 Java 侧 com.cosmoplat.hyida:hyida-starter-obs）
-    # 该 starter 底层就是 aws-java-sdk-s3 + path-style + us-east-1，Python 侧等价实现用 boto3。
-    hyida_obs_enabled: bool = False
-    hyida_obs_access_key: str = ""
-    hyida_obs_secret_key: str = ""
-    hyida_obs_endpoint: str = "https://hd-oss.cosmoplat.com"
-    hyida_obs_bucket: str = "courses"  # 桶名（S3 API 用裸名；Java 侧由调用方传入）
-    hyida_obs_url_prefix: str = "hdCosmo100"  # 对应 Java 侧 urlPrefix：租户前缀，公网 URL 需要它
-    # 公网直读地址是否写成 {endpoint}/{urlPrefix}:{bucket}/{key}。实测：带前缀 200，裸桶名 404
-    hyida_obs_url_account_qualified: bool = True
-    hyida_obs_key_prefix: str = ""  # 对象 key 一级目录：{key_prefix}/...，专用桶留空即可
-    hyida_obs_region: str = "us-east-1"  # Java 侧硬编码 us-east-1
-    hyida_obs_check_max_size: bool = False  # 对应 isCheckMaxSize（Java 侧非空即跳过校验）
-    hyida_obs_max_size_mb: int = 20  # check_max_size 开启时的单文件上限
+    # 课程发布：本地磁盘落盘（Linux 服务器建议指向 nginx 托管目录；
+    # base_url 留空时由本服务静态托管在 /published，见 main.py）
+    local_publish_dir: str = "./published"  # 发布根目录：相对项目根或绝对路径
+    local_publish_base_url: str = ""  # 对外访问前缀；空 = {platform_api_base}/published
 
     @property
     def llm_configured(self) -> bool:
@@ -60,16 +50,6 @@ class Settings(BaseSettings):
     @property
     def search_configured(self) -> bool:
         return bool(self.search_provider and self.search_api_key)
-
-    @property
-    def obs_configured(self) -> bool:
-        return bool(
-            self.hyida_obs_enabled
-            and self.hyida_obs_access_key
-            and self.hyida_obs_secret_key
-            and self.hyida_obs_endpoint
-            and self.hyida_obs_bucket
-        )
 
 
 @lru_cache

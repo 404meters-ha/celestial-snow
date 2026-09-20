@@ -6,5 +6,4 @@ pydantic-settings>=2.6
 httpx>=0.28
 apscheduler>=3.10,<4
 beautifulsoup4>=4.12
-boto3>=1.35  # 卡奥斯 OSS 上传（等价 Java 侧 hyida-starter-obs，底层同为 S3 协议）
 ./vendor/cc-mini

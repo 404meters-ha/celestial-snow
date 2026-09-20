@@ -20,8 +20,8 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `POST /api/industries` `{"name": "生成视频"}` — 定向行业分析（任务类型 `industry`）：LLM 规划关键词 → GitHub 搜索 + 代表项目解析 →
   行业报告入库、项目打标入库、已有项目匹配打标；报告看 `GET /api/industries`（列表）/ `GET /api/industries/{id}`（含 `overview_md` 与项目分类清单）
 - `GET /api/learning-context/{issue_id}` — 一次取全：issue + 仓库元数据 + README + 贡献报告深读段（深度分析/生成课程用这个）
-- `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到卡奥斯 OSS，返回 `entry_url` 等清单
-  （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件）
+- `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到服务器本地磁盘（`LOCAL_PUBLISH_DIR`，默认 `./published`，平台静态托管在 `/published`），返回 `entry_url` 等清单
+  （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件；nginx 接管时改 `LOCAL_PUBLISH_BASE_URL`）
 - `GET /api/tasks?limit=N` — 后台任务状态；`GET /api/config` — 配置状态
 
 ## 约定
@@ -29,7 +29,7 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - 结论要能支撑决策：值不值得投入这个项目 / 这个 issue 适不适合用户上手，给出理由与下一步动作。
 - 输出用精炼的结构化 Markdown。
 - 生成课程走 `/tech` 技能（参数 issue_id，可带 `replace` 表示覆盖已有课程不再询问），不要手工绕过它的流程。
-- 课程有本地与 OSS 两份：本地 `localhost:8100/courses/{id}/` 会回传 quiz 进度，OSS 那份是静态副本（可分享、不计进度）。
+- 课程有本地与发布目录两份：本地 `localhost:8100/courses/{id}/` 会回传 quiz 进度，发布目录（`/published`）那份是静态副本（可分享、不计进度）。
 - 技能参数表单：SKILL.md frontmatter 可写 `arguments: {单行 JSON}`（type: text/issue/select，`visible_if: "existing_course"` 为目前唯一条件），web 端据此渲染结构化表单，取值按声明顺序空格拼进 args。词表两端同步：`app/services/skill_runner.py::_parse_arguments` 与 `App.vue` 的 paramVisible。
 - 列表分页一律服务端 `limit/offset` + 返回 `total`，排序末尾补 `id` tiebreaker（OFFSET 分页要求全序稳定）；`issues.fixed_hint` 是写入时算好的物化列（摄入/LLM 回写各节点经 `scoring.refresh_fixed_hint` 重算），不要回到「取一批再 Python 排序」的老路。
 - 行业/分类标签统一存 `repos.tags`（JSON 数组，只增不减取并集）；新表/新列走 `db._migrate` 的 inspect+ALTER 模式。

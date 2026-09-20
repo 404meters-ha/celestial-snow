@@ -113,30 +113,30 @@ courses/{course_id}/
 1. 列 `courses/{course_id}/` 目录核对文件齐全、lessons 数与注册一致。
 2. 取 `$API/api/courses/{course_id}` 核对元数据。
 
-### 第 7 步 · 发布到卡奥斯 OSS
+### 第 7 步 · 发布到服务器目录
 
-**每次生成课程都要发布**——本地课程目录不是终点，OSS 上要有可分享的一份。
+**每次生成课程都要发布**——本地课程目录不是终点，发布目录里要有可分享的一份。
 
 对 `$API/api/courses/{course_id}/publish` 发 POST（SDK 模式用 PlatformAPI）。
 
 平台负责（你不需要手工改名或改链接）：
 
-- 整门课进独立文件夹 `{course_id}-{repo}-issue{编号}-{课程标题}/`；
+- 整门课进独立文件夹 `{course_id}-{repo}-issue{编号}-{课程标题}/`，落盘到服务器 `LOCAL_PUBLISH_DIR`（默认 `./published`，由平台在 `/published` 静态托管）；
 - 课件文件用注册时的中文课标题命名（`01-overview.html` → `01-项目导览：….html`，`index.html` → `00-课程目录.html`）；
-- 页面之间的相对链接同步改写，OSS 上导航照样可点；
-- 静态副本注入 `window.CELESTIAL_PUBLISHED`，`quiz.js` 据此说明成绩不计入平台进度（OSS 页面调不到 localhost）。
+- 页面之间的相对链接同步改写，发布目录里导航照样可点；
+- 静态副本注入 `window.CELESTIAL_PUBLISHED`，`quiz.js` 据此说明成绩不计入平台进度（发布页面调不到平台 API）。
 
-返回 JSON 里的 `entry_url` 就是可分享的入口，`files[].url` 是每个文件的直链（桶是公共读，直接发人即可）。
+返回 JSON 里的 `entry_url` 就是可分享的入口，`files[].url` 是每个文件的直链（直接发人即可）。
 
 - 重新生成课程后重发，加 `-d '{"prune": true}'` 清掉上一版残留文件。
-- 失败会如实返回错误（未配 OSS 是 503，上传失败是 502），**照实转告用户**，不要当成已发布。
+- 失败会如实返回错误（写入失败是 502，多为权限/磁盘空间问题），**照实转告用户**，不要当成已发布。
 
 ### 第 8 步 · 交付
 
 给用户两个入口：
 
-1. 本地：`http://localhost:8100/courses/{course_id}/index.html`（前端「📚 学习」tab 里也会出现这门课，quiz 会回传进度）；
-2. OSS：第 7 步返回的 `entry_url`（静态副本、可分享，quiz 成绩不记录）。
+1. 平台内：`$API/courses/{course_id}/index.html`（前端「📚 学习」tab 里也会出现这门课，quiz 会回传进度）；
+2. 发布目录：第 7 步返回的 `entry_url`（静态副本、可分享，quiz 成绩不记录）。
 
 ## 已明确移除的 teach 能力
 
