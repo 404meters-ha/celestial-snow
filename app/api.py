@@ -3,9 +3,9 @@ import json
 import re
 import shutil
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import and_, delete, func, or_, select
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from .config import get_settings
@@ -23,7 +23,12 @@ from .models import (
 )
 from .services import course_publish, oss, scoring
 from .services.github_client import GitHubClient
-from .services.industry import industry_pipeline, tagging_pipeline, translate_pipeline
+from .services.industry import (
+    multi_industry_pipeline,
+    parse_input,
+    tagging_pipeline,
+    translate_pipeline,
+)
 from .services.llm import LLMNotConfigured
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
@@ -83,7 +88,7 @@ def list_repos(
     offset: int = 0,
     analyzed: str = "all",  # all | done（已精析）| todo（未精析，含 failed/skipped/无记录）
     period: str = "",  # weekly | monthly | 空=不限榜单期次
-    tag: str = "",  # 按标签精确匹配（repos.tags）
+    tag: list[str] = Query(default=[]),  # 标签多选（AND 交集：同时具备全部所选标签）
 ):
     """项目榜：分页（limit/offset）+ 精析状态/榜单期次/标签过滤；total 供前端分页控件。"""
     with SessionLocal() as session:
@@ -99,7 +104,9 @@ def list_repos(
         if period in ("weekly", "monthly"):
             stmt = stmt.where(Repo.periods.like(_json_like(period)))
         if tag:
-            stmt = stmt.where(Repo.tags.like(_json_like(tag)))
+            conditions = [Repo.tags.like(_json_like(t)) for t in tag if t.strip()]
+            if conditions:
+                stmt = stmt.where(and_(*conditions))
         # id 兜底 tiebreaker：OFFSET 分页要求排序全序稳定
         if sort == "stars":
             stmt = stmt.order_by(Repo.stars.desc(), Repo.id.desc())
@@ -354,6 +361,26 @@ def list_industries():
         }
 
 
+class IndustryParseRequest(BaseModel):
+    text: str
+
+
+@router.post("/industries/parse")
+async def parse_industry_input(req: IndustryParseRequest):
+    """行业分析输入解析（同步快接口，2-5 秒）：拆方向/项目 + 方向归一标签 + 项目定位候选。
+    注册顺序须在 /industries/{industry_id} 之前，否则 "parse" 会被 int 路径参数吃掉。"""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "请输入内容（方向词 + 项目名，如：agent运行时 pi agentScope-java）")
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    github = GitHubClient()
+    try:
+        return await parse_input(github, text)
+    finally:
+        await github.close()
+
+
 @router.get("/industries/{industry_id}")
 def industry_detail(industry_id: int):
     with SessionLocal() as session:
@@ -372,19 +399,25 @@ def industry_detail(industry_id: int):
         }
 
 
-class IndustryRequest(BaseModel):
-    name: str
+class IndustryRunRequest(BaseModel):
+    directions: list[dict]  # [{raw: 用户原词, tag: 归一后 canonical}]
+    repos: list[str] = []  # 种子项目 full_name（确认面板选定的）
 
 
 @router.post("/industries")
-async def create_industry(req: IndustryRequest):
-    """定向行业分析：LLM 规划关键词 → GitHub 搜索 + 代表项目解析 → 行业报告 + 项目打标入库。"""
-    name = req.name.strip()
-    if not name:
-        raise HTTPException(400, "请输入行业/方向词（如：生成视频、向量数据库）")
+async def create_industry(req: IndustryRunRequest):
+    """定向行业分析（确认面板提交）：多方向串行跑完整流水线，种子项目无条件并入各方向候选。"""
+    directions = [
+        {"raw": str(d.get("raw", "")).strip(),
+         "tag": str(d.get("tag", "")).strip() or str(d.get("raw", "")).strip()}
+        for d in req.directions if str(d.get("raw", "")).strip()
+    ]
+    if not directions:
+        raise HTTPException(400, "至少保留一个方向")
     if not get_settings().llm_configured:
         raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
-    task_id = _submit("industry", industry_pipeline, name)
+    seeds = [r.strip() for r in req.repos if "/" in r.strip()]
+    task_id = _submit("industry", multi_industry_pipeline, directions, seeds)
     return {"task_id": task_id}
 
 

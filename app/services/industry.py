@@ -24,6 +24,7 @@ from .llm import (
     LLMClient,
     LLMNotConfigured,
     classify_repos,
+    parse_industry_input,
     plan_industry,
     propose_taxonomy,
     report_industry,
@@ -31,6 +32,7 @@ from .llm import (
 )
 from .pipeline import _upsert_repo
 from .scoring import score_repo
+from .tags import all_tag_names, ensure_tags
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ INDUSTRY_TOP_N = 30  # 报告收录的项目数上限
 SEARCH_KEYWORD_LIMIT = 5  # 有 token 时的搜索次数；无 token 时 Search API 10 次/分钟，砍半
 FLAGSHIP_LIMIT = 15  # 逐个解析的 LLM 代表项目数上限
 TAG_BATCH = 20  # 打标签分批大小
+SEED_CANDIDATES = 5  # 模糊项目名每次给用户挑的候选数
 
 
 def _slim_repo(raw: dict) -> dict:
@@ -56,7 +59,54 @@ def _slim_repo(raw: dict) -> dict:
     }
 
 
-async def industry_pipeline(github: GitHubClient, industry: str, task_id: str, progress) -> dict:
+async def parse_input(github: GitHubClient, text: str) -> dict:
+    """行业分析输入解析（确认面板数据源）：LLM 拆方向/项目 → 方向归一标签、项目定位候选。
+
+    返回 {directions: [{raw, tag}], repos: [{raw, selected, candidates: [{full_name, stars, description}]}]}。
+    """
+    llm = LLMClient()
+    try:
+        if not llm.configured:
+            raise LLMNotConfigured("LLM 未配置（LLM_BASE_URL / LLM_API_KEY），无法解析输入")
+        parsed = await parse_industry_input(llm, text, all_tag_names())
+
+        # 方向词 → 标签库归一（canonical 即将打的标签，确认面板直接展示）
+        raw_directions = [d["canonical"] or d["raw"] for d in parsed["directions"]]
+        mapping = await ensure_tags(llm, raw_directions, source="industry")
+        directions = [{"raw": d["raw"], "tag": mapping.get(d["canonical"] or d["raw"], d["raw"])}
+                      for d in parsed["directions"]]
+
+        # 项目名定位：LLM 猜的 full_name 直接验证；没猜到/猜错则 GitHub 搜名字取 top 候选
+        repos: list[dict] = []
+        for r in parsed["repos"][:8]:
+            candidates: list[dict] = []
+            guessed = r["full_name"]
+            if guessed and "/" in guessed:
+                try:
+                    candidates.append(_slim_repo(await github.get_repo(guessed)))
+                except Exception as e:  # noqa: BLE001 猜错名字很正常，转搜索
+                    logger.info("解析猜名 %s 失败: %s", guessed, e)
+            if len(candidates) < SEED_CANDIDATES:
+                try:
+                    for raw in await github.search_repos(f"{r['raw']} in:name", per_page=SEED_CANDIDATES):
+                        item = _slim_repo(raw)
+                        if item["full_name"] and item["full_name"] not in {c["full_name"] for c in candidates}:
+                            candidates.append(item)
+                except Exception as e:  # noqa: BLE001 搜索失败只剩已验证候选
+                    logger.info("解析搜索 %s 失败: %s", r["raw"], e)
+            if candidates:
+                repos.append({"raw": r["raw"], "selected": candidates[0]["full_name"], "candidates": candidates})
+            else:
+                repos.append({"raw": r["raw"], "selected": "", "candidates": []})
+        return {"directions": directions, "repos": repos}
+    finally:
+        await llm.close()
+
+
+async def industry_pipeline(github: GitHubClient, direction: str, tag: str,
+                            seeds: list[str] | None, task_id: str, progress) -> dict:
+    """单方向完整分析。direction=用户原词（报告名），tag=归一后的 canonical 标签，
+    seeds=用户点名的项目 full_name（无条件并入候选，相当于钦定代表项目）。"""
     settings = get_settings()
     llm = LLMClient()
     if not llm.configured:
@@ -66,12 +116,12 @@ async def industry_pipeline(github: GitHubClient, industry: str, task_id: str, p
     def log(msg: str) -> None:
         _append_log(task_id, msg)  # 时间线 + 最新一行，长任务秒级可见
 
-    stats: dict = {"industry": industry, "searched": 0, "flagship_resolved": 0,
+    stats: dict = {"industry": direction, "tag": tag, "searched": 0, "flagship_resolved": 0,
                    "candidates": 0, "projects": 0, "tagged_existing": 0, "errors": []}
     try:
         # 1. LLM 规划：行业定义 + 子方向 + 搜索关键词 + 代表项目
-        log(f"LLM 规划「{industry}」的调研关键词与代表项目…")
-        plan = await plan_industry(llm, industry, settings.user_profile)
+        log(f"LLM 规划「{direction}」的调研关键词与代表项目…")
+        plan = await plan_industry(llm, direction, settings.user_profile)
         keywords = [str(k).strip() for k in plan.get("search_keywords", []) if str(k).strip()]
         flagships = [str(r).strip() for r in plan.get("flagship_repos", []) if "/" in str(r)]
         log(f"规划完成：{len(keywords)} 个关键词、{len(flagships)} 个代表项目候选、"
@@ -98,7 +148,15 @@ async def industry_pipeline(github: GitHubClient, industry: str, task_id: str, p
             except Exception as e:  # noqa: BLE001 单个关键词失败继续
                 stats["errors"].append(f"搜索 {kw}: {e}")
 
-        # 3. 解析 LLM 认知的代表项目（搜索结果里没有的逐个取详情，404 跳过）
+        # 3. 种子项目（用户点名的）无条件入库候选 + 解析 LLM 认知的代表项目（404 跳过）
+        for name in (seeds or []):
+            if name in candidates:
+                continue
+            try:
+                candidates[name] = _slim_repo(await github.get_repo(name))
+            except Exception as e:  # noqa: BLE001 点名的项目没了，日志说明（确认时选错的兜底）
+                stats["errors"].append(f"种子项目 {name}: {e}")
+                logger.info("种子项目解析失败 %s: %s", name, e)
         for name in flagships[:FLAGSHIP_LIMIT]:
             if name in candidates:
                 stats["flagship_resolved"] += 1
@@ -119,8 +177,8 @@ async def industry_pipeline(github: GitHubClient, industry: str, task_id: str, p
         log(f"候选项目合并去重后 {len(candidates)} 个，取 star 前 {len(top)} 个进入汇总")
 
         # 4. LLM 汇总行业报告（overview_md + 每项目分类定位）
-        log(f"LLM 汇总「{industry}」行业格局报告…")
-        report = await report_industry(llm, industry, settings.user_profile, plan, top)
+        log(f"LLM 汇总「{direction}」行业格局报告…")
+        report = await report_industry(llm, direction, settings.user_profile, plan, top)
         by_name = {c["full_name"]: c for c in top}
         entries: list[dict] = []
         for p in report.get("projects", []):
@@ -134,24 +192,24 @@ async def industry_pipeline(github: GitHubClient, industry: str, task_id: str, p
             entries = [{**c, "category": "", "position": ""} for c in top]
         stats["projects"] = len(entries)
 
-        # 5. 项目入库：走通用 upsert，统一打上行业 tag（periods 不动，非 trending 来源保持空）；
+        # 5. 项目入库：走通用 upsert，统一打上归一后的 canonical 标签（periods 不动，非 trending 来源保持空）；
         #    新项目（rule_score 还是 0）按现有数据补一版规则分，榜单排序有据可依
         with SessionLocal() as session:
             for e in entries:
                 repo = _upsert_repo(session, e)
-                repo.tags = sorted(set((repo.tags or []) + [industry]))
+                repo.tags = sorted(set((repo.tags or []) + [tag]))
                 if not repo.rule_score:
                     repo.rule_score, repo.rule_detail = score_repo(e, period_stars=0, period_days=30)
             session.commit()
-        log(f"{len(entries)} 个项目已入库并打上「{industry}」标签")
+        log(f"{len(entries)} 个项目已入库并打上「{tag}」标签")
 
         # 6. 库内已有项目匹配打标（分批判断是否属于该行业，命中的补 tag）
-        stats["tagged_existing"] = await _tag_existing_for_industry(llm, industry, plan, entries, log)
+        stats["tagged_existing"] = await _tag_existing_for_industry(llm, tag, plan, entries, log)
 
         # 7. 报告落库 + 任务 payload 挂 report_id（前端任务面板可直接跳转）
         with SessionLocal() as session:
             row = IndustryReport(
-                name=industry,
+                name=direction,
                 keywords=keywords,
                 overview_md=str(report.get("overview_md") or ""),
                 projects=[{**e, "in_lib": True} for e in entries],
@@ -172,9 +230,24 @@ async def industry_pipeline(github: GitHubClient, industry: str, task_id: str, p
         await llm.close()
 
 
-async def _tag_existing_for_industry(llm: LLMClient, industry: str, plan: dict,
+async def multi_industry_pipeline(github: GitHubClient, directions: list[dict], seeds: list[str],
+                                  task_id: str, progress) -> dict:
+    """多方向串行跑完整分析（确认面板提交的入口）；单方向失败不拖垮其他。"""
+    results = []
+    for i, d in enumerate(directions, 1):
+        progress(f"方向 {i}/{len(directions)}：{d['raw']}")
+        try:
+            stats = await industry_pipeline(github, d["raw"], d["tag"], seeds, task_id, progress)
+            results.append({"direction": d["raw"], "ok": True, **{k: v for k, v in stats.items() if k != "errors"}})
+        except Exception as e:  # noqa: BLE001 单方向失败继续跑后面的
+            _append_log(task_id, f"方向「{d['raw']}」失败：{e}")
+            results.append({"direction": d["raw"], "ok": False, "error": str(e)})
+    return {"results": results, "seeds": seeds}
+
+
+async def _tag_existing_for_industry(llm: LLMClient, tag: str, plan: dict,
                                      entries: list[dict], log) -> int:
-    """判断库内已有项目（不含本次新入库的）哪些属于该行业，命中补 tag。"""
+    """判断库内已有项目（不含本次新入库的）哪些属于该行业，命中补 canonical 标签。"""
     new_names = {e["full_name"] for e in entries}
     with SessionLocal() as session:
         rows = session.execute(
@@ -189,23 +262,22 @@ async def _tag_existing_for_industry(llm: LLMClient, industry: str, plan: dict,
         return 0
 
     tagged = 0
-    sub_cats = [str(c) for c in plan.get("sub_categories", [])]
     for start in range(0, len(compact), TAG_BATCH):
         batch = compact[start : start + TAG_BATCH]
         try:
-            # 候选分类只给行业名本身：命中 → [行业名]，不命中 → 其他（写入前过滤掉）
-            tags_map = await classify_repos(llm, [industry], batch)
+            # 候选分类只给归一后的标签本身：命中 → [标签]，不命中 → 其他（写入前过滤掉）
+            tags_map = await classify_repos(llm, [tag], batch)
         except Exception as e:  # noqa: BLE001 批次失败不拖垮整体
             logger.warning("行业匹配批次失败: %s", e)
             continue
-        hits = [n for n, tags in tags_map.items() if industry in tags and n not in new_names]
+        hits = [n for n, tags in tags_map.items() if tag in tags and n not in new_names]
         if not hits:
             continue
         with SessionLocal() as session:
             for name in hits:
                 repo = session.scalar(select(Repo).where(Repo.full_name == name))
                 if repo is not None:
-                    repo.tags = sorted(set((repo.tags or []) + [industry]))
+                    repo.tags = sorted(set((repo.tags or []) + [tag]))
                     tagged += 1
             session.commit()
         log(f"已有项目匹配 {start + len(batch)}/{len(compact)}：本批命中 {len(hits)} 个")
@@ -325,9 +397,20 @@ async def tagging_pipeline(github: GitHubClient, task_id: str, progress) -> dict
         stats["repos"] = len(compact)
 
         log(f"LLM 为 {len(compact)} 个项目提出分类体系…")
-        categories = await propose_taxonomy(llm, compact)
+        known = all_tag_names()
+        categories = await propose_taxonomy(llm, compact, known_tags=known)
         if not categories:
             raise ValueError("LLM 未返回有效分类体系，请重试")
+        # 分类体系过标签库归一（体系从库里长出来 + 新词登记），三处打标路径共用一套 canonical
+        mapping = await ensure_tags(llm, categories, source="tagging", log=log)
+        seen: set[str] = set()
+        merged: list[str] = []
+        for c in categories:
+            canon = mapping.get(c, c)
+            if canon not in seen:
+                seen.add(canon)
+                merged.append(canon)
+        categories = merged
         stats["categories"] = categories
         log(f"分类体系（{len(categories)} 类）：{'、'.join(categories)}")
 
