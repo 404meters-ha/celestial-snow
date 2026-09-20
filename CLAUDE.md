@@ -15,6 +15,7 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `GET /api/issues?sort=match|rule|latest&difficulty=低|中|高&deep_only=true&analyzed=all|done|todo&limit=N&offset=N` — issue 排行榜
   （分页返回 `{issues, total}`；`analyzed=done` ⇔ `match_score` 非空（LLM 精筛过）；「疑似已修复」按物化列 `issues.fixed_hint` 在 SQL 沉底）
 - `POST /api/repos/analyze` `{"repo_ids": [...]}` — 批量精析选中项目（≤10 个，任务类型 `analyze`，复用刷新流水线的单仓精析）
+- `POST /api/repos/translate` — 为 `repos.zh_desc`（中文一句话简介）缺失的项目批量生成（已是中文的直接回填，其余 LLM 翻译；任务类型 `translate`；精析完成时也会用 core_idea 兜底回填）
 - `GET /api/tags` — 标签 → 项目数汇总（`repos.tags` JSON 列，行业分析与全量打标都写这里）
 - `POST /api/tags/auto` — 全量自动分类：LLM 先提 8-15 个分类体系，再分批给所有项目打 1-3 个标签（任务类型 `tagging`）
 - `POST /api/industries` `{"name": "生成视频"}` — 定向行业分析（任务类型 `industry`）：LLM 规划关键词 → GitHub 搜索 + 代表项目解析 →

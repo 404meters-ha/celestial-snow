@@ -223,6 +223,22 @@ CLASSIFY_SYSTEM = """你是开源项目分类器。给定候选分类和一批�
 {"items": [{"full_name": "owner/repo", "tags": ["从候选分类中选，1-3个；确实都不合适才用「其他」"]}]}
 必须覆盖输入的每一个 full_name；tags 只能从候选分类里选。"""
 
+TRANSLATE_SYSTEM = """你是开源项目简介翻译器。给定一批 GitHub 项目（名称/原始描述/语言/话题），为每个项目写一句中文简介：它到底是干什么的。严格 JSON（不要 markdown 围栏）：
+{"items": [{"full_name": "owner/repo（原样回显，不得改写）",
+  "zh": "中文一句话简介，≤60字：直说它解决什么问题/给谁用，不用营销腔、不堆形容词"}]}
+必须覆盖输入的每一个 full_name。描述是英文的翻译并提炼；描述缺失或太短的，结合项目名、话题和你的知识推断；实在无从判断就按项目名字面意思简要说明。"""
+
+
+async def translate_descriptions(llm: LLMClient, repos: list[dict]) -> dict[str, str]:
+    """批量生成中文简介：输入 [{full_name, description, language, topics}]，返回 {full_name: zh}。"""
+    user = json.dumps(repos, ensure_ascii=False)
+    data = await llm.chat_json(TRANSLATE_SYSTEM, user, max_tokens=3000)
+    return {
+        str(item["full_name"]): str(item.get("zh") or "").strip()
+        for item in data.get("items", [])
+        if item.get("full_name")
+    }
+
 
 async def plan_industry(llm: LLMClient, industry: str, profile: str) -> dict:
     """行业调研规划：定义 + 子方向 + 搜索关键词 + 代表项目。"""

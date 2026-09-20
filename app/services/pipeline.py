@@ -263,6 +263,9 @@ async def _analyze_one(*, session_factory, github: GitHubClient, llm: LLMClient,
             analysis.readme = readme[:50000]
             analysis.analyzed_at = datetime.now(timezone.utc)
             repo.total_score = total_score(repo.rule_detail, analysis.llm_scores)
+            # 中文简介兜底：精析产出的 core_idea 本身就是中文描述，列表「中文简介」列直接可用
+            if not repo.zh_desc and data.get("core_idea"):
+                repo.zh_desc = str(data["core_idea"])[:120]
             session.commit()
         stats["analyzed"] += 1
     except LLMNotConfigured:
