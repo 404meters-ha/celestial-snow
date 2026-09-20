@@ -123,8 +123,10 @@
       self.root.querySelector('.quiz-submit').disabled = true;
       self.root.querySelector('.quiz-reset').hidden = false;
     }).catch(function () {
-      status.textContent = '得分 ' + score + '/' + self.total +
-        ' · ⚠️ 回传失败（平台未启动？），本次成绩未记录，可重做后再提交';
+      // 发布到 OSS 的静态副本与平台不同源，回传必然失败——那不是故障，如实说明即可
+      status.textContent = '得分 ' + score + '/' + self.total + (window.CELESTIAL_PUBLISHED
+        ? ' · 这是 OSS 静态副本，成绩不计入平台进度（在 localhost:8100 打开可正常记录）'
+        : ' · ⚠️ 回传失败（平台未启动？），本次成绩未记录，可重做后再提交');
       self.root.querySelector('.quiz-submit').disabled = true;
       self.root.querySelector('.quiz-reset').hidden = false;
     });
@@ -150,7 +152,9 @@
           (c.status === 'done' ? '🎉 课程已完成' : '📖 学习中') + '</p>' +
           '<ol class="cp-list">' + rows + '</ol>';
       }).catch(function () {
-        el.innerHTML = '<p class="cp-loading">进度加载失败（平台未启动？）——可直接点下方课程目录学习</p>';
+        el.innerHTML = window.CELESTIAL_PUBLISHED
+          ? '<p class="cp-loading">这是 OSS 静态副本，学习进度以 http://localhost:8100 为准——可直接点下方课程目录学习</p>'
+          : '<p class="cp-loading">进度加载失败（平台未启动？）——可直接点下方课程目录学习</p>';
       });
     },
   };

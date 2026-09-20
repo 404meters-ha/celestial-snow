@@ -193,6 +193,75 @@ async def summarize_issues(llm: LLMClient, issues: list[dict]) -> dict[int, dict
     return {item["number"]: item for item in data.get("items", []) if item.get("number") is not None}
 
 
+# ---------- 定向行业分析 ----------
+
+INDUSTRY_PLAN_SYSTEM = """你是开源领域情报专家。用户给出一个行业/技术方向词，你负责规划一次开源项目调研，输出严格 JSON（不要 markdown 围栏）：
+{
+  "definition": "这个行业/方向是什么、当前处于什么阶段（80字内）",
+  "sub_categories": ["按技术栈或应用场景切分的子方向，6-10个，中文"],
+  "search_keywords": ["GitHub 搜索用的英文关键词/短语，6-10个，覆盖面要广（含通用词与专有名词）"],
+  "flagship_repos": ["你确信存在的代表项目 full_name（owner/repo），8-15个；不确定的不要写"]
+}
+search_keywords 用于 GitHub 搜索，必须是英文；sub_categories 用中文。flagship_repos 只写你非常确定的（如生成视频方向的 comfyanonymous/ComfyUI），宁缺毋滥。"""
+
+INDUSTRY_REPORT_SYSTEM = """你是开源行业分析师。基于给定的行业方向、调研规划和候选项目清单（含 GitHub 实测数据），输出一份行业开源格局报告，严格 JSON（不要 markdown 围栏）：
+{
+  "overview_md": "行业综述 Markdown：## 行业概览（这是什么、发展阶段、驱动因素）、## 开源格局（各子方向代表项目与竞争态势，可加 ### 子标题）、## 与用户的契合点（结合用户画像，2-3条）、## 建议关注顺序（结合成熟度与用户方向）。全文 500-800 字",
+  "projects": [
+    {"full_name": "owner/repo（必须与候选清单完全一致，不得新增或改写）",
+     "category": "所属子方向（从规划的 sub_categories 中选，可自拟更贴切的中文短语）",
+     "position": "一句话定位：它在这行当里扮演什么角色、特色是什么（40字内）"}
+  ]
+}
+projects 必须覆盖候选清单里值得关注的全部项目（可剔除明显不相关的）；全部中文（full_name 除外）。"""
+
+TAXONOMY_SYSTEM = """你是开源项目分类专家。给定一批 GitHub 项目（名称/描述/话题/语言），提出一套覆盖它们的中文行业分类体系，输出严格 JSON（不要 markdown 围栏）：
+{"categories": ["分类名，8-15个，粒度适中（如：AI 视频生成、LLM 应用框架、数据湖、前端框架、DevOps 工具），相互尽量不重叠"]}
+分类要让任何一个项目都能找到归属，可含一个「其他 / 杂项」兜底。"""
+
+CLASSIFY_SYSTEM = """你是开源项目分类器。给定候选分类和一批项目，给每个项目打 1-3 个最贴切的分类标签，输出严格 JSON（不要 markdown 围栏）：
+{"items": [{"full_name": "owner/repo", "tags": ["从候选分类中选，1-3个；确实都不合适才用「其他」"]}]}
+必须覆盖输入的每一个 full_name；tags 只能从候选分类里选。"""
+
+
+async def plan_industry(llm: LLMClient, industry: str, profile: str) -> dict:
+    """行业调研规划：定义 + 子方向 + 搜索关键词 + 代表项目。"""
+    user = f"行业/方向词：{industry}\n\n{PROFILE_NOTE.format(profile=profile)}"
+    return await llm.chat_json(INDUSTRY_PLAN_SYSTEM, user, max_tokens=2000)
+
+
+async def report_industry(llm: LLMClient, industry: str, profile: str, plan: dict, candidates: list[dict]) -> dict:
+    """行业格局报告：overview_md + 每项目分类定位（full_name 必须回显候选清单）。"""
+    user = (
+        f"行业/方向词：{industry}\n{PROFILE_NOTE.format(profile=profile)}\n\n"
+        f"调研规划：{json.dumps({k: plan.get(k) for k in ('definition', 'sub_categories')}, ensure_ascii=False)}\n\n"
+        f"候选项目（GitHub 实测数据，{len(candidates)} 个）：\n"
+        + json.dumps(candidates, ensure_ascii=False)
+    )
+    return await llm.chat_json(INDUSTRY_REPORT_SYSTEM, user, max_tokens=6000)
+
+
+async def propose_taxonomy(llm: LLMClient, repos: list[dict]) -> list[str]:
+    """全量项目的分类体系提案（打标签第一步）。"""
+    user = json.dumps(repos, ensure_ascii=False)
+    data = await llm.chat_json(TAXONOMY_SYSTEM, user, max_tokens=1500)
+    return [str(c) for c in data.get("categories", []) if str(c).strip()]
+
+
+async def classify_repos(llm: LLMClient, categories: list[str], repos: list[dict]) -> dict[str, list[str]]:
+    """按分类体系给一批项目打标签，返回 {full_name: [tag, ...]}。"""
+    user = (
+        f"候选分类：{json.dumps(categories, ensure_ascii=False)}\n\n"
+        f"项目：\n{json.dumps(repos, ensure_ascii=False)}"
+    )
+    data = await llm.chat_json(CLASSIFY_SYSTEM, user, max_tokens=3000)
+    return {
+        str(item["full_name"]): [str(t) for t in item.get("tags", []) if str(t).strip()]
+        for item in data.get("items", [])
+        if item.get("full_name")
+    }
+
+
 async def screen_issues(llm: LLMClient, full_name: str, contributing: str, issues: list[dict], skills: str) -> list[dict]:
     """LLM 预筛适合外部贡献者的 issue，返回 [{number, match, difficulty, reason}]。"""
     slim = [

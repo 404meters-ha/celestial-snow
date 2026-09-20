@@ -33,10 +33,25 @@ class Settings(BaseSettings):
     # 数据库
     db_url: str = "sqlite:///./celestial.db"
 
-    # 技能无头执行（claude -p）
-    skill_run_timeout: int = 3600  # 单次技能执行超时（秒）
-    skill_run_bypass_permissions: bool = False  # False=走 .claude/settings.json 允许清单；.env 设 1 全放行（自担风险）
-    skill_run_cli: str = ""  # 显式指定 CLI 路径；留空则自动探测 claude / cc
+    # 内置 Agent SDK（vendored cc-mini，in-process）
+    skill_run_timeout: int = 3600  # 单次 agent/技能执行超时（秒）
+    # PlatformAPI 工具访问的本服务地址（云端部署时改成对外域名）
+    platform_api_base: str = "http://127.0.0.1:8100"
+
+    # 卡奥斯 OSS（对应 Java 侧 com.cosmoplat.hyida:hyida-starter-obs）
+    # 该 starter 底层就是 aws-java-sdk-s3 + path-style + us-east-1，Python 侧等价实现用 boto3。
+    hyida_obs_enabled: bool = False
+    hyida_obs_access_key: str = ""
+    hyida_obs_secret_key: str = ""
+    hyida_obs_endpoint: str = "https://hd-oss.cosmoplat.com"
+    hyida_obs_bucket: str = "courses"  # 桶名（S3 API 用裸名；Java 侧由调用方传入）
+    hyida_obs_url_prefix: str = "hdCosmo100"  # 对应 Java 侧 urlPrefix：租户前缀，公网 URL 需要它
+    # 公网直读地址是否写成 {endpoint}/{urlPrefix}:{bucket}/{key}。实测：带前缀 200，裸桶名 404
+    hyida_obs_url_account_qualified: bool = True
+    hyida_obs_key_prefix: str = ""  # 对象 key 一级目录：{key_prefix}/...，专用桶留空即可
+    hyida_obs_region: str = "us-east-1"  # Java 侧硬编码 us-east-1
+    hyida_obs_check_max_size: bool = False  # 对应 isCheckMaxSize（Java 侧非空即跳过校验）
+    hyida_obs_max_size_mb: int = 20  # check_max_size 开启时的单文件上限
 
     @property
     def llm_configured(self) -> bool:
@@ -45,6 +60,16 @@ class Settings(BaseSettings):
     @property
     def search_configured(self) -> bool:
         return bool(self.search_provider and self.search_api_key)
+
+    @property
+    def obs_configured(self) -> bool:
+        return bool(
+            self.hyida_obs_enabled
+            and self.hyida_obs_access_key
+            and self.hyida_obs_secret_key
+            and self.hyida_obs_endpoint
+            and self.hyida_obs_bucket
+        )
 
 
 @lru_cache

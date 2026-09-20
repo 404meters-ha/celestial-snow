@@ -2,21 +2,36 @@
 name: tech
 description: 从 celestial-snow 情报站选一个 issue，一次性生成三章 teach 风格课程并托管到平台 /courses。
 disable-model-invocation: true
-argument-hint: "issue_id（可省略；省略时列出可学习的 issue）"
+argument-hint: "issue_id [replace]（issue_id 省略时列出可学习的 issue；replace 表示覆盖已有课程，不再询问）"
+arguments: {"issue_id": {"type": "issue", "label": "目标 issue", "required": true}, "replace": {"type": "select", "label": "该 issue 已有课程时", "visible_if": "existing_course", "options": [{"value": "", "label": "另起新课（保留旧课）"}, {"value": "replace", "label": "重新生成（覆盖旧课，连记录与旧文件一起清）"}]}}
 ---
 
 用户要求你针对情报站里的一个 GitHub issue 生成一门课程。这是一次性批量生成：一门课一次生成全部章节，不是多会话教学。
 
-平台即本机 FastAPI：`http://localhost:8100`（下文 `$API`）。所有 API 调用用 curl。
+平台即本服务：`http://localhost:8100`（下文 `$API`）。
+
+## 运行环境（先看你手上有哪套工具，再按下表映射）
+
+本技能在两种环境跑同一套流程：
+
+| 要做的事 | Claude Code（本地，有 Shell） | 平台 SDK（web 表单执行） |
+|---|---|---|
+| 平台 API（learning-context / 注册课程 / 发布） | `curl` | **PlatformAPI** 工具（POST 带 method+body） |
+| 抓 GitHub 代码 / README / issue | `curl` api.github.com | **WebFetch** 工具 |
+| 读技能模板（assets/、各 FORMAT 文件） | 直接读 `.claude/skills/tech/` | **ReadFile** 工具（可读 `.claude/skills/` 与 `courses/`） |
+| 写课程文件 `courses/{id}/` | 直接写文件 | **WriteFile** 工具（只能写 `courses/` 下） |
+| 核对文件清单 | `ls` | **ListDir** 工具 |
 
 ## 总流程
 
-`GET $API/api/learning-context/{issue_id}` 取全上下文 → 研读素材（必要时拉真实代码）→ 设计三章骨架 → `POST $API/api/courses` 注册拿 `course_id` → 写盘 `courses/{course_id}/` → 校验 → 给出学习入口。
+本次调用参数（可能为空）：`$ARGUMENTS`
+
+`GET $API/api/learning-context/{issue_id}` 取全上下文 → 研读素材（必要时拉真实代码）→ 设计三章骨架 → `POST $API/api/courses` 注册拿 `course_id` → 写盘 `courses/{course_id}/` → 校验 → 发布 → 给出学习入口。
 
 ### 第 0 步 · 确定目标 issue
 
-- 无参数：`curl -s "$API/api/issues?sort=match&deep_only=true&limit=20"`，把候选列给用户（id、repo #number、标题、匹配度、难度），等用户选择后停止。
-- 有 issue_id：直接进入第 1 步。
+- 参数为空：取 `$API/api/issues?sort=match&deep_only=true&limit=20`，把候选列给用户（id、repo #number、标题、匹配度、难度），等用户选择后停止。
+- 参数非空：第一个词就是 issue_id，直接进入第 1 步；若参数里还带 `replace`，覆盖旧课的选择已由用户做完，第 1 步不要再问。
 
 ### 第 1 步 · 取上下文
 
@@ -28,15 +43,16 @@ argument-hint: "issue_id（可省略；省略时列出可学习的 issue）"
 - `report`：贡献报告对该 issue 的深读段落 `this_issue`（背景、切入方式）与仓库综合判断
 - `existing_course`：该 issue 已有的课程
 
-**若 `existing_course` 非空：必须先问用户**——覆盖（重生成，`POST /api/courses` 带 `"replace": true`，平台清掉旧课程记录；你随后删掉旧课程目录 `courses/{旧id}/`）还是新开（保留旧课，另起新课）。
+**若 `existing_course` 非空：必须先问用户**——覆盖（重生成，`POST /api/courses` 带 `"replace": true`，平台会连旧课程记录与旧课程目录一起清，不需要你删文件）还是新开（保留旧课，另起新课）。
+例外：参数里带了 `replace`（web 表单已代用户选过）就直接走覆盖分支，不要再问。
 
 ### 第 2 步 · 研读素材，不许凭参数记忆写课
 
 课程的可信度来自真实材料。README 与 issue 深读已在上下文里；**核心代码路径一章必须落到真实文件**：
 
-1. 用 `curl -s https://api.github.com/repos/{owner}/{repo}/contents/{path}`（或 raw.githubusercontent.com）看仓库结构，找到与该 issue 相关的模块文件。
+1. 取 `https://api.github.com/repos/{owner}/{repo}/contents/{path}`（或 raw.githubusercontent.com）看仓库结构，找到与该 issue 相关的模块文件。
 2. 读关键源文件的相关片段，确认：入口在哪、数据怎么流、issue 指的问题出在哪段逻辑。
-3. 若 issue 正文（`body_excerpt`）被截断，用 `curl -s https://api.github.com/repos/{owner}/{repo}/issues/{number}` 拉全文。
+3. 若 issue 正文（`body_excerpt`）被截断，取 `https://api.github.com/repos/{owner}/{repo}/issues/{number}` 拉全文。
 4. 课上所有代码片段必须来自你实际拉到的文件，并附 GitHub 深链（blob 链接可锚定行号）。拉不到的宁可写「路径与判断方法」也不编造代码。
 
 ### 第 3 步 · 设计课程骨架
@@ -74,8 +90,8 @@ curl -s -X POST "$API/api/courses" -H "Content-Type: application/json" -d '{
 courses/{course_id}/
 ├── index.html            课程首页（进度 + 目录）
 ├── assets/
-│   ├── style.css         ← 从本 skill 的 assets/ 原样复制
-│   └── quiz.js           ← 从本 skill 的 assets/ 原样复制
+│   ├── style.css         ← 从本 skill 的 assets/ 原样复制（SDK 模式：ReadFile 读出后 WriteFile 原样写入，不要重写内容）
+│   └── quiz.js           ← 同上
 ├── 01-….html … NN-….html 各课
 ├── MISSION.md
 ├── RESOURCES.md
@@ -92,11 +108,35 @@ courses/{course_id}/
 - **RESOURCES.md**：本课引用过的真实来源（README、issue、关键源文件、官方文档），按 RESOURCES-FORMAT.md。
 - **learning-records/**：写 `0001-<slug>.md` 初始记录，概述这门课覆盖了什么、issue 的核心结论（格式见 LEARNING-RECORD-FORMAT.md）。
 
-### 第 6 步 · 校验与交付
+### 第 6 步 · 校验
 
-1. `ls courses/{course_id}/` 核对文件齐全、lessons 数与注册一致。
-2. `curl -s "$API/api/courses/{course_id}"` 核对元数据。
-3. 交付给用户：入口 `http://localhost:8100/courses/{course_id}/index.html`（前端「📚 学习」tab 里也会出现这门课）。
+1. 列 `courses/{course_id}/` 目录核对文件齐全、lessons 数与注册一致。
+2. 取 `$API/api/courses/{course_id}` 核对元数据。
+
+### 第 7 步 · 发布到卡奥斯 OSS
+
+**每次生成课程都要发布**——本地课程目录不是终点，OSS 上要有可分享的一份。
+
+对 `$API/api/courses/{course_id}/publish` 发 POST（SDK 模式用 PlatformAPI）。
+
+平台负责（你不需要手工改名或改链接）：
+
+- 整门课进独立文件夹 `{course_id}-{repo}-issue{编号}-{课程标题}/`；
+- 课件文件用注册时的中文课标题命名（`01-overview.html` → `01-项目导览：….html`，`index.html` → `00-课程目录.html`）；
+- 页面之间的相对链接同步改写，OSS 上导航照样可点；
+- 静态副本注入 `window.CELESTIAL_PUBLISHED`，`quiz.js` 据此说明成绩不计入平台进度（OSS 页面调不到 localhost）。
+
+返回 JSON 里的 `entry_url` 就是可分享的入口，`files[].url` 是每个文件的直链（桶是公共读，直接发人即可）。
+
+- 重新生成课程后重发，加 `-d '{"prune": true}'` 清掉上一版残留文件。
+- 失败会如实返回错误（未配 OSS 是 503，上传失败是 502），**照实转告用户**，不要当成已发布。
+
+### 第 8 步 · 交付
+
+给用户两个入口：
+
+1. 本地：`http://localhost:8100/courses/{course_id}/index.html`（前端「📚 学习」tab 里也会出现这门课，quiz 会回传进度）；
+2. OSS：第 7 步返回的 `entry_url`（静态副本、可分享，quiz 成绩不记录）。
 
 ## 已明确移除的 teach 能力
 

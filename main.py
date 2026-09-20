@@ -35,6 +35,20 @@ async def _scheduled_refresh() -> None:
         await github.close()
 
 
+async def _warm_agent_sdk() -> None:
+    """预热内置 Agent SDK：首次运行时构造 Engine 会同步导入一大串依赖（实测阻塞事件循环 2s+，
+    让「点了运行没反应」——POST 的响应被压在后面出不去）。这里在后台线程先付掉这笔开销。"""
+    from app.services import agent_sdk  # noqa: F401 触发核心模块导入
+
+    def _warm() -> None:
+        try:
+            agent_sdk.warmup()
+        except Exception:  # noqa: BLE001 预热只是提速，失败不能影响启动
+            logger.warning("Agent SDK 预热失败（不影响功能，只是首次运行会慢一点）", exc_info=True)
+
+    await asyncio.to_thread(_warm)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -46,6 +60,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(_scheduled_refresh, CronTrigger(hour=get_settings().sched_hour, minute=0))
     scheduler.start()
     logger.info("调度器已启动：每天 %02d:00 抓取分析", get_settings().sched_hour)
+    await _warm_agent_sdk()
     yield
     scheduler.shutdown()
 

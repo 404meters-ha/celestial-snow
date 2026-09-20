@@ -22,7 +22,7 @@ from .llm import (
     screen_issues,
     summarize_issues,
 )
-from .scoring import issue_rule_score, score_repo, total_score
+from .scoring import issue_rule_score, refresh_fixed_hint, score_repo, total_score
 from .search import SearchClient
 from .trending import TrendingFetcher
 
@@ -282,6 +282,36 @@ async def _analyze_one(*, session_factory, github: GitHubClient, llm: LLMClient,
                 session.commit()
 
 
+# ---------- 流水线 1.5：批量精析选中的项目（「未精析」tab 的配套动作） ----------
+
+MAX_ANALYZE_REPOS = 10
+
+async def analyze_pipeline(github: GitHubClient, repo_ids: list[int], task_id: str, progress) -> dict:
+    """对选中的仓库逐个跑 LLM 精析（复用刷新流水线的 _analyze_one，重跑覆盖）。"""
+    if len(repo_ids) > MAX_ANALYZE_REPOS:
+        raise ValueError(f"每次最多精析 {MAX_ANALYZE_REPOS} 个项目")
+    settings = get_settings()
+    llm = LLMClient()
+    if not llm.configured:
+        await llm.close()
+        raise LLMNotConfigured("LLM 未配置（LLM_BASE_URL / LLM_API_KEY），无法精析")
+    search = SearchClient()
+    stats: dict = {"analyzed": 0, "errors": []}
+    try:
+        with SessionLocal() as session:
+            names = [n for (n,) in session.execute(
+                select(Repo.full_name).where(Repo.id.in_(repo_ids))).all()]
+        if not names:
+            raise ValueError("没有有效的仓库")
+        for i, name in enumerate(names, 1):
+            progress(f"LLM 精析 {i}/{len(names)}：{name}")
+            await _analyze_one(session_factory=SessionLocal, github=github, llm=llm, search=search,
+                               profile=settings.user_profile, full_name=name, stats=stats)
+        return stats
+    finally:
+        await llm.close()
+
+
 # ---------- 流水线 2：贡献机会分析 ----------
 
 async def _summarize_top_issues(llm: LLMClient, progress, stats: dict) -> None:
@@ -317,6 +347,7 @@ async def _summarize_top_issues(llm: LLMClient, progress, stats: dict) -> None:
                 managed = session.get(Issue, row.id)
                 managed.summary = item.get("summary") or ""
                 managed.action = item.get("action") or ""
+                refresh_fixed_hint(managed)
             session.commit()
         done += len(batch)
         progress(f"issue 摘要 {done}/{len(rows)}…")
@@ -340,6 +371,7 @@ def _upsert_issue(session, repo: Repo, raw: dict, skills: list[str]) -> Issue:
     issue.comments_count = int(raw.get("comments") or 0)
     issue.body_excerpt = (raw.get("body") or "")[:1000]
     issue.rule_match_score = rule_score
+    refresh_fixed_hint(issue)
     return issue
 
 
@@ -403,6 +435,7 @@ async def contribution_pipeline(github: GitHubClient, repo_ids: list[int], task_
                             row.match_score = float(p.get("match") or 0)
                             row.difficulty = p.get("difficulty") or ""
                             row.screen_reason = p.get("reason") or ""
+                            refresh_fixed_hint(row)
                     session.commit()
 
                 by_number = {i["number"]: i for i in issues}
@@ -431,6 +464,7 @@ async def contribution_pipeline(github: GitHubClient, repo_ids: list[int], task_
                                 row.difficulty = detail.get("difficulty") or row.difficulty
                                 row.summary = detail.get("background") or row.summary
                                 row.action = detail.get("approach") or row.action
+                                refresh_fixed_hint(row)
                             session.commit()
                     except Exception as e:  # noqa: BLE001 单 issue 深读失败跳过
                         result["errors"].append(f"{full_name}#{number}: {e}")

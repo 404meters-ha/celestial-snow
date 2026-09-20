@@ -5,6 +5,7 @@
 LLM 三维由分析阶段补足——未分析的项目总分天然低于已分析的，正是想要的排序。
 """
 import logging
+import re
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,33 @@ def _dim(source: dict, key: str) -> float:
         return float(node.get("score") or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+# ---------- 「疑似已修复」提示（issue 排序沉底用） ----------
+
+# 合入/合并只在带 main/master/主分支 上下文时才算提示（「检查 PR 是否已合并」是行动指引，不是过期信号）
+FIXED_HINT_RE = re.compile(
+    r"疑似已"  # 疑似已在 main 分支由 #xxx 修复
+    r"|(可能|或许|估计|应)已?在\s*(main|master|主分支)"
+    r"|已(经)?(修复|解决|关闭)"
+    r"|已(经)?在\s*(main|master|主分支)[^。]{0,20}(合入|合并)"
+    r"|already\s+(been\s+)?(fix\w*|merged?)|fix(ed)?\s+in\s+(main|master|#\d)|duplicate\s+of"
+    r"|与\s*#\d+\s*重复",
+    re.IGNORECASE,
+)
+
+
+def refresh_fixed_hint(issue) -> bool:
+    """title/summary/action/screen_reason 带过期信号 → True，写回物化列 fixed_hint。
+
+    在摄入与 LLM 回写 summary/action/screen_reason 的节点顺带重算；
+    之前 API 层取 300 条再 Python 排序，分页（OFFSET）下会破坏全局排序。
+    """
+    text = " ".join(
+        filter(None, [issue.title, issue.summary, issue.action, issue.screen_reason])
+    )
+    issue.fixed_hint = bool(FIXED_HINT_RE.search(text))
+    return issue.fixed_hint
 
 
 # ---------- issue 规则预分（无 LLM 也能出 issue 排行） ----------

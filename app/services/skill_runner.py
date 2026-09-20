@@ -1,15 +1,14 @@
-"""通用技能执行器：把 Claude Code 技能变成平台可一键调用的能力。
+"""技能发现与 prompt 解析；执行统一委托给 agent_sdk（in-process SDK，无子进程）。
 
-机制：`claude -p "/<技能> <参数>"` 无头执行，cwd 固定在项目根。
-技能（SKILL.md）是每次 claude 会话启动时从磁盘现读的——因此
-新增/修改 `.claude/skills/` 或 `~/.claude/skills/` 下的技能，
-下一次调用即生效，服务端无需重启，也没有任何注册动作。
+技能（SKILL.md）是每次调用现读磁盘的——新增/修改 `.claude/skills/` 或
+`~/.claude/skills/` 下的技能，下一次调用即生效，服务端无需重启。
+frontmatter 里 `requires: local` 的技能依赖本地文件环境（如写课程文件），SDK 不支持。
+
+参数表单：frontmatter 可写 `arguments: {单行 JSON}`，web 端据此把 args 文本框升级为结构化表单
+（issue 下拉 / 单选 / 文本），把「执行中问用户」提前到「提交前选好」。词表见 _parse_arguments。
 """
-import asyncio
 import json
-import os
 import re
-import shutil
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -17,23 +16,42 @@ PROJECT_SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
 USER_SKILLS_DIR = Path.home() / ".claude" / "skills"
 
 
-def _parse_frontmatter(text: str) -> dict:
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """SKILL.md 的 frontmatter 只有扁平 key: value，正则解析足够，不引 yaml 依赖。
 
-    描述若是 YAML 折叠/字面标量（>、|- 等），回退为正文第一个非空行——列表展示够用。
+    返回 (字段表, 正文)。描述若是 YAML 折叠/字面标量（>、|- 等），回退为正文第一个非空行。
     """
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)", text, re.S)
     fields: dict[str, str] = {}
-    if not m:
-        return fields
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            key, value = line.split(":", 1)
-            fields[key.strip()] = value.strip().strip('"')
+    body = text
+    if m:
+        for line in m.group(1).splitlines():
+            if ":" in line:
+                key, value = line.split(":", 1)
+                fields[key.strip()] = value.strip().strip('"')
+        body = m.group(2)
     if fields.get("description", "") in (">", ">-", "|", "|-", "|+", "+"):
-        body_line = next((ln.strip() for ln in m.group(2).splitlines() if ln.strip()), "")
+        body_line = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
         fields["description"] = body_line[:120]
-    return fields
+    return fields, body
+
+
+def _parse_arguments(raw: str) -> dict:
+    """frontmatter 的 `arguments:` 值（单行 JSON）→ 参数表。坏 JSON 静默忽略，退回普通 args 文本框。
+
+    词表（前端渲染依据，保持两端同步）：
+      type: "text" 文本框 | "issue" issue 下拉（数据来自 /api/issues）| "select" 单选
+      label / placeholder / required
+      visible_if: "existing_course" —— 目前唯一条件：所选 issue 已有课程时才显示（/tech 的覆盖选择）
+    参数按声明顺序以空格拼进 args（空值跳过），技能正文照旧用 $ARGUMENTS 接。
+    """
+    try:
+        args = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(args, dict):
+        return {}
+    return {k: v for k, v in args.items() if isinstance(v, dict)}
 
 
 def list_skills() -> list[dict]:
@@ -48,140 +66,62 @@ def list_skills() -> list[dict]:
             if not d.is_dir() or not skill_md.is_file():
                 continue
             try:
-                fm = _parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
+                fields, _ = _parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
             except OSError:
                 continue
-            name = fm.get("name") or d.name
+            name = fields.get("name") or d.name
             if name in seen:
                 continue
             seen.add(name)
             skills.append({
                 "name": name,
                 "scope": scope,
-                "description": fm.get("description", ""),
-                "argument_hint": fm.get("argument-hint", ""),
+                "description": fields.get("description", ""),
+                "argument_hint": fields.get("argument-hint", ""),
+                "requires": fields.get("requires", "").lower(),
+                "arguments": _parse_arguments(fields.get("arguments", "")),
             })
     return skills
 
 
-def _child_env() -> dict:
-    """剥离外层 Claude 会话的环境变量，避免嵌套会话检测/配置串扰。"""
-    env = {k: v for k, v in os.environ.items()
-           if k != "CLAUDECODE" and not k.startswith("CLAUDE_")}
-    env["CI"] = "1"  # 无头环境：关闭交互式提示分支
-    return env
+def resolve_skill(name: str, args: str) -> str:
+    """读技能正文（剥 frontmatter，$ARGUMENTS 替换参数）作为 SDK 的 prompt。
+
+    requires: local 的技能抛错——它们要写本地文件（如课程生成），云端 SDK 无文件工具。
+    """
+    for root in (PROJECT_SKILLS_DIR, USER_SKILLS_DIR):
+        skill_md = root / name / "SKILL.md"
+        if skill_md.is_file():
+            try:
+                fields, body = _parse_frontmatter(skill_md.read_text(encoding="utf-8", errors="replace"))
+            except OSError as e:
+                raise RuntimeError(f"技能 {name} 读取失败：{e}") from e
+            if fields.get("requires", "").lower() == "local":
+                raise RuntimeError(f"技能 /{name} 标记了 requires: local，需要本地文件环境，SDK 引擎不支持")
+            return body.replace("$ARGUMENTS", args.strip())
+    raise RuntimeError(f"技能 {name} 不存在（检查 .claude/skills/ 或 ~/.claude/skills/）")
 
 
-_CLI_CACHE: str | None = None  # 探测成功的 CLI 路径，进程内缓存
+async def run_prompt(prompt: str, task_id: str, progress, log=None, timeout: int = 3600) -> dict:
+    """无头执行一段 prompt：/开头解析为技能（正文注入），自由文本原样执行。
 
-
-async def _probe(cli: str) -> tuple[bool, str]:
-    """用 --version 试跑一次：本机策略可能拦某个二进制（如 WinError 786），跑得动才算数。"""
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            cli, "--version", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            env=_child_env())
-        out, err = await proc.communicate()
-        if proc.returncode == 0:
-            return True, out.decode("utf-8", "replace").strip()
-        return False, f"rc={proc.returncode} {err.decode('utf-8', 'replace').strip()[:120]}"
-    except OSError as e:
-        return False, str(e)
-
-
-async def _resolve_cli() -> str:
-    """找到本机能跑的 Claude CLI：SKILL_RUN_CLI 显式指定 > claude > cc，探测通过后缓存。"""
-    global _CLI_CACHE
-    if _CLI_CACHE:
-        return _CLI_CACHE
-    from ..config import get_settings
-
-    candidates: list[str] = []
-    if get_settings().skill_run_cli:
-        candidates.append(get_settings().skill_run_cli)
-    for name in ("claude", "cc"):
-        found = shutil.which(name)
-        if found and found not in candidates:
-            candidates.append(found)
-    errors: list[str] = []
-    for c in candidates:
-        ok, detail = await _probe(c)
-        if ok:
-            _CLI_CACHE = c
-            return c
-        errors.append(f"{c} → {detail}")
-    raise RuntimeError("没有可用的 Claude CLI。探测记录：" + "；".join(errors))
-
-
-async def run_skill(name: str, args: str, task_id: str, progress, timeout: int = 3600) -> dict:
-    """无头执行一个技能，stream-json 事件实时转成任务进度。
-
+    log 是追加式时间线回调（前端进度面板用）；不传时退回 progress 的单行语义。
     返回 {result, cost_usd, duration_ms, num_turns}；由调用方（任务层）落库。
     """
-    from ..config import get_settings
+    from . import agent_sdk
 
-    claude = await _resolve_cli()
-    progress(f"使用 CLI：{claude}")
+    emit = log or progress
+    prompt = prompt.strip()
+    if prompt.startswith("/"):
+        m = re.match(r"^/([\w-]+)\s*(.*)$", prompt, re.S)
+        if m:
+            emit(f"解析技能 /{m.group(1)}…")
+            prompt = resolve_skill(m.group(1), m.group(2))
+    emit("启动内置 Agent SDK…")
+    return await agent_sdk.run(prompt, progress, log=log, timeout=timeout)
 
-    cmd = [claude, "-p", f"/{name} {args}".strip(), "--output-format", "stream-json", "--verbose"]
-    if get_settings().skill_run_bypass_permissions:
-        cmd.append("--dangerously-skip-permissions")
 
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, cwd=str(PROJECT_ROOT),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=_child_env(),
-    )
-    progress(f"已启动 claude -p /{name}（pid {proc.pid}）")
-
-    stderr_tail: list[str] = []
-
-    async def _drain_stderr() -> None:
-        while True:
-            line = await proc.stderr.readline()
-            if not line:
-                return
-            stderr_tail.append(line.decode("utf-8", errors="replace").rstrip())
-            del stderr_tail[:-20]  # 只留尾部 20 行用于报错
-
-    stderr_task = asyncio.create_task(_drain_stderr())
-    result: dict = {"result": "", "cost_usd": None, "duration_ms": None, "num_turns": None}
-
-    async def _pump() -> None:
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                return
-            raw = line.decode("utf-8", errors="replace").strip()
-            if not raw.startswith("{"):
-                continue
-            try:
-                event = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            etype = event.get("type")
-            if etype == "assistant":
-                for block in (event.get("message") or {}).get("content") or []:
-                    if block.get("type") == "tool_use":
-                        brief = str(block.get("input") or {}).replace("\n", " ")[:100]
-                        progress(f"{block.get('name', 'tool')}: {brief}")
-                    elif block.get("type") == "text" and block.get("text", "").strip():
-                        progress("生成中: " + block["text"].strip().replace("\n", " ")[:100])
-            elif etype == "result":
-                result["result"] = event.get("result") or ""
-                result["cost_usd"] = event.get("total_cost_usd")
-                result["duration_ms"] = event.get("duration_ms")
-                result["num_turns"] = event.get("num_turns")
-
-    try:
-        await asyncio.wait_for(asyncio.gather(_pump(), stderr_task, proc.wait()), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise RuntimeError(f"技能执行超时（>{timeout}s），已终止") from None
-
-    if proc.returncode != 0:
-        tail = "\n".join(stderr_tail[-10:]) or "(无 stderr)"
-        raise RuntimeError(f"claude 退出码 {proc.returncode}：{tail}")
-
-    progress("执行完成")
-    return result
+async def run_skill(name: str, args: str, task_id: str, progress, log=None,
+                    timeout: int = 3600) -> dict:
+    """执行一个技能（等价 run_prompt(f"/{name} {args}")），参数与结果同 run_prompt。"""
+    return await run_prompt(f"/{name} {args}".strip(), task_id, progress, log=log, timeout=timeout)

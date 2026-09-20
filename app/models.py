@@ -32,6 +32,8 @@ class Repo(Base):
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # 出现在哪些榜：["weekly"] / ["monthly"] / ["weekly", "monthly"]（双榜）
     periods: Mapped[list] = mapped_column(JSON, default=list)
+    # 行业/分类标签（LLM 定向分析与全量自动分类写入），如 ["AI 视频生成", "模型推理"]
+    tags: Mapped[list] = mapped_column(JSON, default=list)
 
     # 最近一次规则分（每次刷新重算）
     rule_score: Mapped[float] = mapped_column(Float, default=0.0)
@@ -75,8 +77,10 @@ class Analysis(Base):
     # {"enterprise_potential": {"score": int, "reason": str}, "match": {...}, "learning_value": {...}}
     llm_scores: Mapped[dict] = mapped_column(JSON, default=dict)
     model: Mapped[str] = mapped_column(String(128), default="")
-    note: Mapped[str] = mapped_column(Text, default="")  # 降级原因等
+    note: Mapped[str] = mapped_column(Text, default="")  # 降级原因等；AI 命令分析以「AI」开头
     readme: Mapped[str] = mapped_column(Text, default="")  # 缓存，避免重复拉取
+    # AI 命令栏产生的完整 Markdown 报告（刷新流水线的分析不写这个字段）
+    report_md: Mapped[str] = mapped_column(Text, default="")
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     repo: Mapped[Repo] = relationship(back_populates="analysis")
@@ -130,6 +134,9 @@ class Issue(Base):
     screen_reason: Mapped[str] = mapped_column(Text, default="")  # 预筛理由
     deep_read: Mapped[bool] = mapped_column(Boolean, default=False)  # 是否做过逐 issue 深读
     body_excerpt: Mapped[str] = mapped_column(Text, default="")
+    # 「疑似已修复」物化列（正则见 scoring.FIXED_HINT_RE）：排序沉底用，
+    # 摄入/LLM 回写各节点顺带重算——之前在 API 层取 300 条 Python 排序，没法做分页
+    fixed_hint: Mapped[bool] = mapped_column(Boolean, default=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
@@ -140,18 +147,43 @@ class Issue(Base):
 
 
 class TaskRun(Base):
-    """后台任务记录（刷新 / 贡献分析），供前端轮询进度。"""
+    """后台任务记录（刷新 / 贡献分析 / 技能 / AI 命令），供前端轮询进度。
+
+    logs 是**追加式时间线**（`[{"t": iso, "msg": str}]`，封顶 200 条）：progress 只留最后一行，
+    长任务（实测 74~338s）里中间过程会互相覆盖，前端只能看到一行且几乎不动。
+    """
 
     __tablename__ = "task_runs"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # uuid
-    type: Mapped[str] = mapped_column(String(32))  # refresh | contribution
+    type: Mapped[str] = mapped_column(String(32))  # refresh | contribution | skill | agent | industry | tagging | analyze
     status: Mapped[str] = mapped_column(String(16), default="running")  # running|success|failed
     progress: Mapped[str] = mapped_column(Text, default="")
+    logs: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str] = mapped_column(Text, default="")
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class IndustryReport(Base):
+    """定向行业分析报告：一次「行业词」分析 = 一份报告（生成流程见 services/industry.py）。
+
+    projects JSON：[{"full_name", "category", "position", "stars", "language", "in_lib"}]——
+    LLM 汇总后的项目清单（含分类与一句话定位），in_lib 标记是否已入项目库。
+    """
+
+    __tablename__ = "industry_reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), index=True)  # 用户输入的行业词
+    keywords: Mapped[list] = mapped_column(JSON, default=list)  # LLM 规划的搜索关键词
+    overview_md: Mapped[str] = mapped_column(Text, default="")  # 行业综述（Markdown）
+    projects: Mapped[list] = mapped_column(JSON, default=list)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)  # 搜索/解析/打标过程统计
+    model: Mapped[str] = mapped_column(String(128), default="")
+    task_id: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Course(Base):
@@ -159,6 +191,7 @@ class Course(Base):
 
     lessons JSON：[{"lesson_id": "01-overview", "title": "...", "file": "01-overview.html",
     "quiz_count": 4}]——quiz 进度按 lesson_id 与 quiz_results 对账。
+    publish JSON：最近一次发布到卡奥斯 OSS 的清单（文件夹、入口 URL、文件列表、时间）。
     """
 
     __tablename__ = "courses"
@@ -170,6 +203,7 @@ class Course(Base):
     title: Mapped[str] = mapped_column(String(512), default="")
     lessons: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), default="learning")  # learning|done
+    publish: Mapped[dict] = mapped_column(JSON, default=dict)  # 最近一次 OSS 发布清单
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     repo: Mapped[Repo] = relationship()

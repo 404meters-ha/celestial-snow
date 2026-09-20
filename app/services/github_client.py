@@ -56,6 +56,14 @@ class GitHubClient:
         )
         return resp.json().get("items", [])
 
+    async def search_repos(self, query: str, *, per_page: int = 30) -> list[dict]:
+        """通用关键词搜索（定向行业分析用）：query 为完整搜索表达式，按 star 降序。"""
+        resp = await self._get(
+            "/search/repositories",
+            params={"q": query, "sort": "stars", "order": "desc", "per_page": min(per_page, 100)},
+        )
+        return resp.json().get("items", [])
+
     async def get_repo(self, full_name: str) -> dict:
         return (await self._get(f"/repos/{full_name}")).json()
 
