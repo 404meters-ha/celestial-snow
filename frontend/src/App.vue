@@ -360,10 +360,11 @@
             <el-table-column label="生成时间" width="170">
               <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="140" fixed="right">
+            <el-table-column label="操作" width="190" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openIndustry(row.id)">查看报告</el-button>
                 <el-button link type="warning" @click="filterTag(row.name)">看项目</el-button>
+                <el-button link type="danger" @click="removeIndustry(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -670,11 +671,12 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos,
-  getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag,
-  postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate, runAgent,
+  deleteIndustry, getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues,
+  getRepo, getRepos, getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
+  postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
+  runAgent,
 } from './api'
 
 const activeTab = ref('repos')
@@ -993,6 +995,20 @@ async function loadIndustries() {
     ElMessage.error(`加载行业报告失败：${e.message}`)
   } finally {
     industriesLoading.value = false
+  }
+}
+
+/** 删除一份行业报告（只删报告记录；项目上的标签是累积知识，保留） */
+async function removeIndustry(row) {
+  try {
+    await ElMessageBox.confirm(`删除行业报告「${row.name}」？项目上的标签会保留。`, '删除确认', { type: 'warning' })
+  } catch { /* 取消 */ return }
+  try {
+    await deleteIndustry(row.id)
+    ElMessage.success('已删除')
+    loadIndustries()
+  } catch (e) {
+    ElMessage.error(e.message)
   }
 }
 

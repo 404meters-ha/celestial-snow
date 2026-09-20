@@ -22,6 +22,15 @@ async function apiPost(path, body) {
   return data
 }
 
+async function apiDelete(path) {
+  const res = await fetch(BASE + path, { method: 'DELETE' })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `${res.status} 请求失败`)
+  }
+  return data
+}
+
 // 项目榜：分页（limit/offset）+ 精析状态（analyzed=all|done|todo）+ 榜单期次（period）+ 标签（tag）
 export const getRepos = (params = {}) => {
   const qs = new URLSearchParams()
@@ -68,6 +77,7 @@ export const getIndustry = (id) => apiGet(`/api/industries/${id}`)
 // 两段式：先解析（确认面板数据源），确认后跑多方向分析
 export const postIndustryParse = (text) => apiPost('/api/industries/parse', { text })
 export const postIndustryRuns = (payload) => apiPost('/api/industries', payload)
+export const deleteIndustry = (id) => apiDelete(`/api/industries/${id}`)
 // 学习闭环：/tech 取上下文、注册课程；课程 HTML 静态托管在 /courses/{id}/
 export const getLearningContext = (issueId) => apiGet(`/api/learning-context/${issueId}`)
 export const postCourse = (payload) => apiPost('/api/courses', payload)
