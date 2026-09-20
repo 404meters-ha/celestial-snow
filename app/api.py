@@ -60,6 +60,8 @@ def _repo_view(repo: Repo, analysis: Analysis | None) -> dict:
         "rule_detail": repo.rule_detail or {},
         "total_score": repo.total_score,
         "first_seen_at": repo.first_seen_at.isoformat() if repo.first_seen_at else None,
+        "github_created_at": repo.github_created_at.isoformat() if repo.github_created_at else None,
+        "pushed_at": repo.pushed_at.isoformat() if repo.pushed_at else None,
         "analyzed": bool(analysis and analysis.status == "done"),
         "ai_analyzed": bool(analysis and analysis.note.startswith("AI")),
         "core_idea": analysis.core_idea if analysis else "",
