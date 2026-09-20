@@ -34,6 +34,8 @@ class Repo(Base):
     periods: Mapped[list] = mapped_column(JSON, default=list)
     # 行业/分类标签（LLM 定向分析与全量自动分类写入），如 ["AI 视频生成", "模型推理"]
     tags: Mapped[list] = mapped_column(JSON, default=list)
+    # 中文一句话简介（LLM 从英文描述翻译/提炼；精析过的项目由 core_idea 回填）
+    zh_desc: Mapped[str] = mapped_column(Text, default="")
 
     # 最近一次规则分（每次刷新重算）
     rule_score: Mapped[float] = mapped_column(Float, default=0.0)

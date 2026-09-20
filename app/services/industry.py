@@ -1,14 +1,17 @@
-"""定向行业分析与项目打标签。
+"""定向行业分析、项目打标签、中文简介翻译——LLM 批量维护任务。
 
 industry_pipeline：用户给一个行业词（如「生成视频」）→ LLM 规划关键词与代表项目 →
 GitHub 搜索 + 逐个解析代表项目 → LLM 汇总行业格局报告 → 项目入库打标 → 库内已有项目匹配打标。
 
 tagging_pipeline：一次性给库内全部项目建分类体系并打标签（不限定行业）。
 
+translate_pipeline：为 zh_desc 缺失的项目批量生成中文一句话简介（已是中文的直接回填）。
+
 由 TaskManager 驱动（经 api._submit 包装，签名 (github, *args, task_id, progress)）；
 过程日志走 _append_log 时间线（比单行 progress 更能看出长任务在动）。
 """
 import logging
+import re
 
 from sqlalchemy import select
 
@@ -24,6 +27,7 @@ from .llm import (
     plan_industry,
     propose_taxonomy,
     report_industry,
+    translate_descriptions,
 )
 from .pipeline import _upsert_repo
 from .scoring import score_repo
@@ -206,6 +210,82 @@ async def _tag_existing_for_industry(llm: LLMClient, industry: str, plan: dict,
             session.commit()
         log(f"已有项目匹配 {start + len(batch)}/{len(compact)}：本批命中 {len(hits)} 个")
     return tagged
+
+
+# ---------- 中文简介翻译 ----------
+
+_CJK_RE = re.compile(r"[一-鿿]")
+
+
+async def translate_pipeline(github: GitHubClient, task_id: str, progress) -> dict:
+    """为 zh_desc 缺失的项目批量生成中文一句话简介（github 参数仅为契合 _submit 签名，不使用）。
+
+    描述本身已是中文的直接回填（不耗 LLM）；其余分批翻译。只填空缺，不覆盖已有值
+    （精析回填的 core_idea 版本与人工重跑都互不干扰）。
+    """
+    llm = LLMClient()
+    if not llm.configured:
+        await llm.close()
+        raise LLMNotConfigured("LLM 未配置（LLM_BASE_URL / LLM_API_KEY），无法翻译简介")
+
+    def log(msg: str) -> None:
+        _append_log(task_id, msg)
+
+    stats: dict = {"missing": 0, "copied": 0, "translated": 0, "errors": []}
+    try:
+        with SessionLocal() as session:
+            rows = session.execute(
+                select(Repo).where(Repo.zh_desc == "").order_by(Repo.stars.desc())
+            ).scalars().all()
+            stats["missing"] = len(rows)
+            pending: list[Repo] = []
+            copied = 0
+            for r in rows:  # 描述已是中文的：直接回填，不进 LLM 批次
+                if r.description and _CJK_RE.search(r.description):
+                    r.zh_desc = r.description[:120]
+                    copied += 1
+                else:
+                    pending.append(r)
+            session.commit()
+        stats["copied"] = copied
+        if not pending:
+            log(f"没有需要翻译的项目（缺失 {stats['missing']}，其中已是中文直接回填 {copied} 个）")
+            return stats
+        log(f"缺失中文简介 {stats['missing']} 个：{copied} 个描述已是中文直接回填，"
+            f"{len(pending)} 个进入 LLM 翻译")
+
+        done = 0
+        for start in range(0, len(pending), TAG_BATCH):
+            batch = pending[start : start + TAG_BATCH]
+            slim = [
+                {
+                    "full_name": r.full_name,
+                    "description": (r.description or "")[:200],
+                    "language": r.language,
+                    "topics": (r.topics or [])[:5],
+                }
+                for r in batch
+            ]
+            try:
+                zh_map = await translate_descriptions(llm, slim)
+            except Exception as e:  # noqa: BLE001 批次失败继续
+                stats["errors"].append(f"批次 {batch[0].full_name}…: {e}")
+                continue
+            with SessionLocal() as session:
+                for r in batch:
+                    zh = zh_map.get(r.full_name)
+                    if zh:
+                        managed = session.scalar(select(Repo).where(Repo.full_name == r.full_name))
+                        if managed is not None and not managed.zh_desc:
+                            managed.zh_desc = zh[:120]
+                            stats["translated"] += 1
+                session.commit()
+            done += len(batch)
+            log(f"翻译 {done}/{len(pending)}…")
+        log(f"完成：直接回填 {copied} + 翻译 {stats['translated']} 个")
+        return stats
+    finally:
+        await llm.close()
 
 
 # ---------- 全量自动分类打标 ----------

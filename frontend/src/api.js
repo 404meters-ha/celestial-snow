@@ -57,6 +57,8 @@ export const postRefresh = () => apiPost('/api/refresh')
 export const postContribute = (repoIds) => apiPost('/api/contributions', { repo_ids: repoIds })
 // 批量精析选中的项目（「未精析」队列入口）
 export const postAnalyze = (repoIds) => apiPost('/api/repos/analyze', { repo_ids: repoIds })
+// 为缺失中文简介的项目批量生成（英文描述翻译/提炼）
+export const postTranslate = () => apiPost('/api/repos/translate')
 // 标签 / 定向行业分析
 export const getTags = () => apiGet('/api/tags')
 export const postAutoTag = () => apiPost('/api/tags/auto')

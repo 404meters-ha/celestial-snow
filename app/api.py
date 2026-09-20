@@ -24,7 +24,7 @@ from .models import (
 from .services import course_publish, scoring
 from .services.store import StoreError
 from .services.github_client import GitHubClient
-from .services.industry import industry_pipeline, tagging_pipeline
+from .services.industry import industry_pipeline, tagging_pipeline, translate_pipeline
 from .services.llm import LLMNotConfigured
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
@@ -46,6 +46,7 @@ def _repo_view(repo: Repo, analysis: Analysis | None) -> dict:
         "id": repo.id,
         "full_name": repo.full_name,
         "description": repo.description,
+        "zh_desc": repo.zh_desc or "",
         "language": repo.language,
         "topics": repo.topics or [],
         "homepage": repo.homepage,
@@ -409,6 +410,15 @@ async def analyze_repos(req: AnalyzeRequest):
     if not get_settings().llm_configured:
         raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
     task_id = _submit("analyze", analyze_pipeline, req.repo_ids)
+    return {"task_id": task_id}
+
+
+@router.post("/repos/translate")
+async def translate_repos():
+    """为 zh_desc 缺失的项目批量生成中文一句话简介（已是中文的直接回填，其余 LLM 翻译）。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    task_id = _submit("translate", translate_pipeline)
     return {"task_id": task_id}
 
 

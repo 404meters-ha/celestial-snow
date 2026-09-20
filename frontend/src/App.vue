@@ -82,6 +82,7 @@
               <el-option v-for="t in tagOptions" :key="t.tag" :value="t.tag" :label="`${t.tag}（${t.count}）`" />
             </el-select>
             <el-input v-model="q" placeholder="搜索项目名 / 描述" clearable class="search" @input="debouncedLoad" />
+            <el-button :loading="translating" @click="runTranslate">译中文简介</el-button>
             <span class="picked-hint">已选 {{ picked.length }}/5</span>
             <el-button type="warning" :disabled="picked.length === 0" :loading="analyzing" @click="analyzeSelected">
               ✨ 精析选中
@@ -106,6 +107,15 @@
                   <el-tag v-for="t in row.tags" :key="t" size="small" effect="plain" class="tag-chip"
                     @click="filterTag(t)">{{ t }}</el-tag>
                 </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="中文简介" min-width="240">
+              <template #default="{ row }">
+                <el-tooltip v-if="row.zh_desc || row.core_idea" :content="row.zh_desc || row.core_idea"
+                  placement="top" :show-after="400">
+                  <span class="zh-desc">{{ row.zh_desc || row.core_idea }}</span>
+                </el-tooltip>
+                <span v-else class="muted">—（点「译中文简介」生成）</span>
               </template>
             </el-table-column>
             <el-table-column prop="language" label="语言" width="110" />
@@ -616,7 +626,7 @@ import { ElMessage } from 'element-plus'
 import {
   getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos,
   getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag,
-  postContribute, postIndustry, postRefresh, runAgent,
+  postContribute, postIndustry, postRefresh, postTranslate, runAgent,
 } from './api'
 
 const activeTab = ref('repos')
@@ -647,6 +657,7 @@ const industryVisible = ref(false)
 const industryReport = ref(null)
 const tagging = ref(false)
 const analyzing = ref(false)
+const translating = ref(false)
 const picked = ref([])
 const config = ref(null)
 const detailVisible = ref(false)
@@ -763,6 +774,7 @@ const TASK_TYPE_LABELS = {
   industry: '定向行业分析',
   tagging: '项目自动打标',
   analyze: '批量精析',
+  translate: '中文简介翻译',
 }
 
 /** 面板头部标识任务本身：连发多条时面板会在任务间切换（前一个结束就接手下一个运行中的），
@@ -1037,6 +1049,19 @@ async function analyzeSelected() {
     ElMessage.error(e.message)
   } finally {
     analyzing.value = false
+  }
+}
+
+async function runTranslate() {
+  translating.value = true
+  try {
+    const { task_id: taskId } = await postTranslate()
+    ElMessage.success('中文简介翻译已提交：已是中文的直接回填，其余由 LLM 翻译提炼')
+    focusTask(taskId, () => { loadRepos(); startPolling(loadRepos) })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    translating.value = false
   }
 }
 
@@ -1410,6 +1435,7 @@ h4 { margin: 18px 0 8px; }
 .tag-select { width: 160px; }
 
 /* 行内标签 / 行业洞察 */
+.zh-desc { font-size: 12px; color: #4a5160; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.5; }
 .repo-tags { margin-top: 4px; }
 .tag-chip { margin-right: 4px; cursor: pointer; }
 .industry-input { width: 320px; }

@@ -47,6 +47,8 @@ def _migrate() -> None:
         repo_columns = {c["name"] for c in inspect(engine).get_columns("repos")}
         if "tags" not in repo_columns:
             conn.execute(text("ALTER TABLE repos ADD COLUMN tags JSON DEFAULT '[]'"))
+        if "zh_desc" not in repo_columns:
+            conn.execute(text("ALTER TABLE repos ADD COLUMN zh_desc TEXT DEFAULT ''"))
         analysis_columns = {c["name"] for c in inspect(engine).get_columns("analyses")}
         if "report_md" not in analysis_columns:
             conn.execute(text("ALTER TABLE analyses ADD COLUMN report_md TEXT DEFAULT ''"))
