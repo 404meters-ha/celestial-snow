@@ -19,11 +19,11 @@ from features.cost_tracker import CostTracker
 
 MAX_TURNS = 60  # API 轮次上限，防失控（课程生成一类任务工具调用多，40 不够用）
 
-# 文件白名单：agent 只能碰这两棵子树。读=技能资产模板+已生成课程；写=课程产物。
+# 文件白名单：agent 只能碰产物子树。读=技能资产模板+课程+脚手架；写=课程产物+脚手架工作区。
 # .env / 源码 / 数据库都在白名单外——LLM 拿不到凭据是底线。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-READ_ROOTS = [PROJECT_ROOT / ".claude" / "skills", PROJECT_ROOT / "courses"]
-WRITE_ROOT = PROJECT_ROOT / "courses"
+READ_ROOTS = [PROJECT_ROOT / ".claude" / "skills", PROJECT_ROOT / "courses", PROJECT_ROOT / "scaffolds"]
+WRITE_ROOTS = [PROJECT_ROOT / "courses", PROJECT_ROOT / "scaffolds"]
 TEXT_LOG_INTERVAL = 2.5  # 生成期进度上报的最小间隔（秒）；阈值只看时间不看字符数，
 # 否则慢流（每块几十字符）永远够不到门槛，界面又冻住
 
@@ -149,7 +149,7 @@ class ReadFileTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("读取一个文本文件的内容（带行号）。只能读 .claude/skills/ 与 courses/ 下的文件；"
+        return ("读取一个文本文件的内容（带行号）。只能读 .claude/skills/、courses/ 与 scaffolds/ 下的文件；"
                 "路径可写相对项目根的（如 .claude/skills/tech/assets/quiz.js）或绝对路径。")
 
     @property
@@ -212,7 +212,7 @@ class ListDirTool(Tool):
         return True
 
     def execute(self, path: str = "", **_) -> ToolResult:
-        p = _resolve_under(path, READ_ROOTS + [WRITE_ROOT])
+        p = _resolve_under(path, READ_ROOTS)
         if p is None:
             return ToolResult(f"拒绝：{path} 不在可列范围", is_error=True)
         if not p.is_dir():
@@ -223,7 +223,7 @@ class ListDirTool(Tool):
 
 
 class WriteFileTool(Tool):
-    """写课程文件：只能写 courses/ 下，父目录自动创建，覆盖式（重生成课程幂等）。"""
+    """写产物文件：只能写 courses/ 与 scaffolds/ 下，父目录自动创建，覆盖式（重生成幂等）。"""
 
     @property
     def name(self) -> str:
@@ -231,7 +231,7 @@ class WriteFileTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("写入一个文件（覆盖已有内容）。**只能写 courses/ 目录下**（课程产物）；"
+        return ("写入一个文件（覆盖已有内容）。**只能写 courses/ 或 scaffolds/ 目录下**（产物区）；"
                 "父目录不存在会自动创建。content 必须是完整文件内容。")
 
     @property
@@ -252,9 +252,9 @@ class WriteFileTool(Tool):
         return False
 
     def execute(self, path: str = "", content: str = "", **_) -> ToolResult:
-        p = _resolve_under(path, [WRITE_ROOT])
+        p = _resolve_under(path, WRITE_ROOTS)
         if p is None:
-            return ToolResult(f"拒绝：{path} 不在可写范围（只能写 courses/ 下）", is_error=True)
+            return ToolResult(f"拒绝：{path} 不在可写范围（只能写 courses/ 或 scaffolds/ 下）", is_error=True)
         if not content and not isinstance(content, str):
             return ToolResult("content 不能为空", is_error=True)
         try:
@@ -327,7 +327,7 @@ def _system_prompt() -> str:
 
 ## 环境与能力
 - 你运行在云服务进程内，没有 Shell。工具四个：WebFetch（抓远程网页/GitHub）、PlatformAPI（调本平台 API）、
-  ReadFile/ListDir（读 .claude/skills/ 技能资产与 courses/ 课程文件）、WriteFile（只能写 courses/ 下）。
+  ReadFile/ListDir（读 .claude/skills/ 技能资产与 courses/、scaffolds/ 产物文件）、WriteFile（只能写 courses/ 或 scaffolds/ 下）。
 - 分析对象是 GitHub 上的开源项目代码与 issue：一切信息通过网络获取，禁止凭空编造。
 
 ## 平台工具手册（生成课程一类任务用）
@@ -380,10 +380,13 @@ def warmup() -> None:
 
 
 async def run(prompt: str, progress, log=None, timeout: int = 3600,
-              max_turns: int = MAX_TURNS) -> dict:
+              max_turns: int = MAX_TURNS, system_prompt: str | None = None,
+              max_tokens: int | None = None) -> dict:
     """执行一次 agent。prompt 为自由指令或已解析好的技能正文。
 
     log 是追加式时间线回调（长任务用）；不传时退回 progress 的单行覆盖语义。
+    system_prompt 不传时用默认的分析 agent 身份；任务型调用方（如脚手架生成）传自己的。
+    max_tokens 不传时走 vendor 默认（openai 回落 8192）；生成类任务单轮输出大，传 16384+。
     返回 {result, cost_usd, duration_ms, num_turns}；由调用方（任务层）落库。
     """
     from ..config import get_settings
@@ -396,12 +399,13 @@ async def run(prompt: str, progress, log=None, timeout: int = 3600,
     cost = CostTracker()
     engine = Engine(
         tools=[WebFetchTool(), PlatformApiTool(), ReadFileTool(), ListDirTool(), WriteFileTool()],
-        system_prompt=_system_prompt(),
+        system_prompt=system_prompt or _system_prompt(),
         permission_checker=PermissionChecker(auto_approve=True),
         provider="openai",
         api_key=s.llm_api_key,
         base_url=s.llm_base_url,
         model=s.llm_model,
+        max_tokens=max_tokens,
         cost_tracker=cost,
     )
 

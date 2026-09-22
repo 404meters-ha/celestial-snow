@@ -27,6 +27,16 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到卡奥斯 OSS，返回 `entry_url` 等清单
   （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件）
 - `GET /api/tasks?limit=N` — 后台任务状态；`GET /api/config` — 配置状态
+- `POST /api/scaffold/requests {"text":"一句话需求"}` — 脚手架匹配任务（status=matching→matched，产出 `need_brief` 与 `framework_candidates` 5-8 个，
+  双轨适配度 fit=规则0-40+LLM0-60）；`GET /api/scaffold/requests` 分页列表 / `GET /{id}` 详情；`POST /{id}/match` 改话重跑
+- `POST /api/scaffold/requests/{id}/adopt {"full_name"}` — 采用分支（同步评估报告，终态 done_adopt）
+- `POST /api/scaffold/requests/{id}/split` — 拆技术条目（同步 2-10 秒，matched→split；同需求命中拆解缓存秒回）；
+  `PUT /{id}/items {"items":[…],"tech_stack":"…"}` — 条目增删改确认 → selecting 任务 → selected（每条目 candidates 3-5 双轨评分，条目关键词入 tags）
+- `POST /api/scaffold/requests/{id}/select {"selections":[{no, full_name|null}]}` — 逐条选型提交（null=自研）→ scaffold_build 任务：
+  base 预判 → Agent 生成六件套（README/前端页/docs 三件/LICENSES）→ 校验打包 → status=built，`build` JSON 含 zip_url/base 主干/license 告警；
+  产物 `GET /scaffolds/{id}/scaffold.zip` 直链下载（main.py 静态挂载，工作区 scaffolds/workspace/ 用完即清）
+- 三层缓存（`scaffold_caches` 表，内容寻址指纹）：拆解（需求→条目）/ fit（条目+项目→分）/ build（组合指纹→产物，同组合重生成秒回不重跑 Agent；
+  生成规范升级靠指纹版本号升版自动失效（当前 v3：相对导入静态校验门））
 
 ## 约定
 
@@ -34,6 +44,7 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - 输出用精炼的结构化 Markdown。
 - 生成课程走 `/tech` 技能（参数 issue_id，可带 `replace` 表示覆盖已有课程不再询问），不要手工绕过它的流程。
 - 课程有本地与 OSS 两份：本地 `localhost:8100/courses/{id}/` 会回传 quiz 进度，OSS 那份是静态副本（可分享、不计进度）。
+- 子路径部署走 `.env` 的 `BASE_PATH`（如 `/celestial-snow`）：后端 `_BasePathStrip` 中间件剥前缀（带/不带前缀都能访问），前端 `vite.config.js` 读同一份 `.env` 定构建 base，`api.js` 的 `BASE` 与课程 quiz.js 的相对回传路径（`../../api/…`）自动跟随；改动后须 `cd frontend && npm run build`。
 - 技能参数表单：SKILL.md frontmatter 可写 `arguments: {单行 JSON}`（type: text/issue/select，`visible_if: "existing_course"` 为目前唯一条件），web 端据此渲染结构化表单，取值按声明顺序空格拼进 args。词表两端同步：`app/services/skill_runner.py::_parse_arguments` 与 `App.vue` 的 paramVisible。
 - 列表分页一律服务端 `limit/offset` + 返回 `total`，排序末尾补 `id` tiebreaker（OFFSET 分页要求全序稳定）；`issues.fixed_hint` 是写入时算好的物化列（摄入/LLM 回写各节点经 `scoring.refresh_fixed_hint` 重算），不要回到「取一批再 Python 排序」的老路。
 - 行业/分类标签统一存 `repos.tags`（JSON 数组，只增不减取并集）；新表/新列走 `db._migrate` 的 inspect+ALTER 模式。

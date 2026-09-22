@@ -269,6 +269,7 @@ class LLMClient:
             tools=tools or [],
             effort=effort,
             stream=False,
+            base_url=self._base_url,
         )
         response = self._client.chat.completions.create(**params)
         choice = response.choices[0] if response.choices else None
@@ -348,6 +349,7 @@ class _OpenAIStream:
             tools=tools,
             effort=effort,
             stream=True,
+            base_url=getattr(client, "base_url", None),
         )
         self._stream = None
         self._text_parts: list[str] = []
@@ -554,6 +556,7 @@ def _build_openai_request(
     tools: list[dict[str, Any]],
     effort: str | None,
     stream: bool,
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "model": model,
@@ -565,6 +568,11 @@ def _build_openai_request(
         params["tools"] = [_tool_schema_to_openai(tool) for tool in tools]
     if effort and supports_reasoning_effort(_OPENAI_PROVIDER, model):
         params["reasoning_effort"] = effort
+    if base_url:
+        # 第三方 OpenAI 兼容端点（GLM 等）：显式关思考。思考模型会把推理链写进
+        # reasoning_content 并挤占 max_tokens，极端时 content 为空（finish_reason=max_tokens）。
+        # extra_body 是 OpenAI SDK 官方姿势，未知字段的端点若不认会 400（GLM 认）。
+        params["extra_body"] = {"thinking": {"type": "disabled"}}
     return params
 
 

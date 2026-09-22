@@ -370,6 +370,70 @@
           </el-table>
         </el-tab-pane>
 
+        <!-- ================= 脚手架 ================= -->
+        <el-tab-pane name="scaffold">
+          <template #label>
+            <span class="tab-label">🏗 脚手架</span>
+          </template>
+
+          <el-alert type="info" :closable="false" show-icon class="task-alert"
+            title="一句话描述想做的系统 → 检索匹配开源框架（适配度%）→ 直接采用或拆成技术条目逐条选型 → 最终整合生成可启动的脚手架 zip（分期上线：当前为整体匹配）" />
+
+          <div class="toolbar">
+            <el-input v-model="scaffoldInput" placeholder="一句话需求，如：想做个流放之路洗装备的工具"
+              clearable class="industry-input" @keyup.enter="runScaffold" />
+            <el-button type="primary" :loading="scaffoldRunning" @click="runScaffold">开始匹配</el-button>
+            <el-button :loading="scaffoldsLoading" @click="resetScaffoldPage">刷新</el-button>
+            <span class="picked-hint">匹配约 30-60 秒，双轨评分（规则 + LLM 语义）</span>
+          </div>
+
+          <el-empty v-if="!scaffoldsLoading && scaffolds.length === 0"
+            description="还没有需求——输入一句话，让平台帮你找现成的开源框架" />
+
+          <el-table v-else :data="scaffolds" v-loading="scaffoldsLoading" row-key="id" stripe>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="scaffoldStatus(row.status).type" size="small">
+                  {{ scaffoldStatus(row.status).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="需求（一句话）" min-width="300">
+              <template #default="{ row }">
+                <a href="javascript:;" class="repo-name" @click="openScaffold(row.id)">{{ row.raw_text }}</a>
+                <div class="repo-desc">{{ row.domain || '（归纳中…）' }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="最佳候选 / 进度" min-width="240">
+              <template #default="{ row }">
+                <template v-if="row.top_candidate">
+                  <span class="repo-name">{{ row.top_candidate }}</span>
+                  <el-tag size="small" :type="scoreType(row.top_fit)" class="scaffold-fit-tag">
+                    适配 {{ row.top_fit }}
+                  </el-tag>
+                </template>
+                <span v-else class="muted">{{ row.status === 'matching' ? '匹配中…' : '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="160">
+              <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="110" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openScaffold(row.id)">
+                  {{ row.status === 'matched' ? '查看候选' : row.status === 'done_adopt' ? '查看报告' : '继续' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager">
+            <el-pagination v-model:current-page="scaffoldPage" :page-size="scaffoldPageSize"
+              :total="scaffoldTotal" layout="total, prev, pager, next"
+              @current-change="loadScaffolds" />
+          </div>
+        </el-tab-pane>
+
         <!-- ================= 学习 ================= -->
         <el-tab-pane name="learning">
           <template #label>
@@ -607,8 +671,225 @@
       </template>
     </el-dialog>
 
-    <!-- 技能运行参数对话框：声明了 arguments 的技能渲染结构化表单（把「执行中问用户」提前到提交前） -->
-    <el-dialog v-model="skillDialog" :title="`运行 /${currentSkill?.name}`" width="560px">
+    <!-- 脚手架需求详情抽屉：按状态分态渲染（当前：matched 候选榜；拆条/选型/生成随 V2/V3 上线） -->
+    <el-drawer v-model="scaffoldVisible" :title="`脚手架需求 #${scaffoldDetail?.id || ''}`" size="58%">
+      <template v-if="scaffoldDetail">
+        <div class="detail-stats">
+          <el-tag :type="scaffoldStatus(scaffoldDetail.status).type">
+            {{ scaffoldStatus(scaffoldDetail.status).label }}
+          </el-tag>
+          <el-tag v-if="scaffoldDetail.domain" effect="plain">{{ scaffoldDetail.domain }}</el-tag>
+          <el-tag v-if="scaffoldDetail.candidate_count" type="info" size="small">
+            候选 {{ scaffoldDetail.candidate_count }}
+          </el-tag>
+        </div>
+
+        <p class="scaffold-raw">「{{ scaffoldDetail.raw_text }}」</p>
+
+        <!-- 采用分支（终态）：clone 地址 + 评估报告 -->
+        <template v-if="scaffoldDetail.status === 'done_adopt'">
+          <h4>已采用</h4>
+          <div class="adopt-box">
+            <a :href="`https://github.com/${scaffoldDetail.adopt_repo}`" target="_blank" class="repo-name">
+              {{ scaffoldDetail.adopt_repo }}
+            </a>
+            <el-input :model-value="adoptCloneUrl" readonly size="small" class="adopt-clone">
+              <template #append>
+                <el-button @click="copyText(adoptCloneUrl, 'clone 地址')">复制 clone</el-button>
+              </template>
+            </el-input>
+          </div>
+          <h4>评估报告</h4>
+          <div class="md-body" v-html="adoptMdHtml"></div>
+        </template>
+
+        <template v-else-if="scaffoldDetail.need_brief?.summary">
+          <h4>需求理解</h4>
+          <p>{{ scaffoldDetail.need_brief.summary }}</p>
+          <p v-if="(scaffoldDetail.need_brief.features || []).length">
+            <b>核心功能：</b>
+            <el-tag v-for="f in scaffoldDetail.need_brief.features" :key="f" size="small" effect="plain"
+              class="label-tag">{{ f }}</el-tag>
+          </p>
+          <p v-if="scaffoldDetail.need_brief.scale"><b>规模：</b>{{ scaffoldDetail.need_brief.scale }}</p>
+          <p v-if="(scaffoldDetail.need_brief.constraints || []).length" class="muted">
+            约束：{{ scaffoldDetail.need_brief.constraints.join('；') }}
+          </p>
+        </template>
+
+        <template v-if="(scaffoldDetail.framework_candidates || []).length
+          && scaffoldDetail.status === 'matched'">
+          <h4>候选框架（{{ scaffoldDetail.framework_candidates.length }}，按适配度降序）</h4>
+          <el-table :data="scaffoldDetail.framework_candidates" size="small" row-key="full_name" stripe>
+            <el-table-column label="适配度" width="150" sortable :sort-by="'fit_score'">
+              <template #default="{ row }">
+                <el-tooltip placement="top" :show-after="300">
+                  <template #content>
+                    <div>规则分（语言/关键词/活跃）：{{ row.rule_score }} / 40</div>
+                    <div>LLM 语义分（需求 vs 定位）：{{ row.llm_score }} / 60</div>
+                    <div v-if="row.rule_reason">{{ row.rule_reason }}</div>
+                  </template>
+                  <div class="match-cell">
+                    <el-progress :percentage="Math.min(row.fit_score, 100)" :stroke-width="10"
+                      :color="matchColor(row.fit_score)" class="match-bar" />
+                    <span class="match-num">{{ row.fit_score }}</span>
+                  </div>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="项目" min-width="280">
+              <template #default="{ row }">
+                <div class="repo-title">
+                  <a :href="`https://github.com/${row.full_name}`" target="_blank" class="repo-name">
+                    {{ row.full_name }}
+                  </a>
+                  <el-tag size="small" effect="plain">{{ row.language || '?' }}</el-tag>
+                  <span class="muted">⭐ {{ (row.stars || 0).toLocaleString() }}</span>
+                </div>
+                <div class="repo-desc">{{ row.zh_desc || row.description }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="适配理由" min-width="220">
+              <template #default="{ row }">
+                <span v-if="row.reason">{{ row.reason }}</span>
+                <span v-else class="muted">（LLM 评分未产出，仅规则分）</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="success" :loading="adoptingRepo === row.full_name"
+                  @click="adoptCandidate(row)">采用</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="detail-actions">
+            <el-button :loading="scaffoldRematching" @click="rematchScaffoldRow">🔄 重新匹配（可改话）</el-button>
+            <el-button type="warning" :loading="splittingScaffold" @click="runSplit">🔧 拆条继续</el-button>
+          </div>
+        </template>
+
+        <!-- 拆条编辑面板：split 态 + selected 态的「改条目重选」都走这里 -->
+        <template v-else-if="scaffoldDetail.status === 'split' || editingItems">
+          <h4>技术条目（可增删改，确认后逐条选型开源组件）</h4>
+          <div class="split-bar">
+            <span class="muted">主技术栈：</span>
+            <el-select v-model="splitStack" filterable allow-create size="small" class="stack-select"
+              placeholder="选择或输入">
+              <el-option v-for="s in STACK_OPTIONS" :key="s" :value="s" :label="s" />
+            </el-select>
+            <el-button size="small" @click="addSplitItem">＋ 添加条目</el-button>
+            <el-tooltip content="重新让 LLM 拆解（会覆盖当前编辑；同一句话命中缓存秒出）" placement="top">
+              <el-button size="small" :loading="splittingScaffold" @click="runSplit">🔄 重新拆条</el-button>
+            </el-tooltip>
+          </div>
+          <div v-for="(it, i) in splitItems" :key="i" class="split-row">
+            <span class="split-no">{{ i + 1 }}</span>
+            <div class="split-fields">
+              <div class="split-line1">
+                <el-input v-model="it.name" size="small" placeholder="条目名（如：视觉识别）" class="split-name" />
+                <el-input v-model="it.kw" size="small" placeholder="检索关键词（英文，逗号分隔）" class="split-kw" />
+                <el-button link type="danger" size="small" @click="splitItems.splice(i, 1)">删除</el-button>
+              </div>
+              <el-input v-model="it.desc" size="small" placeholder="职责描述（做什么、怎么与其他条目配合）" />
+            </div>
+          </div>
+          <div class="detail-actions">
+            <el-button type="primary" :loading="scaffoldSelecting" @click="confirmItems">
+              ✅ 确认并选型（{{ splitItems.length }} 条）
+            </el-button>
+          </div>
+        </template>
+
+        <!-- 条目选型面板：逐条勾一个候选或标自研（built 态点「改选型」也回到这里） -->
+        <template v-else-if="scaffoldDetail.status === 'selected' || reselecting">
+          <h4>逐条选型（每个条目选一个候选开源项目，或标自研）</h4>
+          <div v-for="it in scaffoldDetail.items" :key="it.no" class="sel-item">
+            <div class="sel-head">
+              <b>{{ it.no }}. {{ it.name }}</b>
+              <span class="muted sel-desc">{{ it.desc }}</span>
+            </div>
+            <el-radio-group v-model="selChoices[it.no]" class="sel-radios">
+              <el-radio v-for="c in it.candidates || []" :key="c.full_name"
+                :value="c.full_name" class="sel-radio">
+                <a :href="`https://github.com/${c.full_name}`" target="_blank" class="repo-name"
+                  @click.stop>{{ c.full_name }}</a>
+                <el-tag size="small" :type="scoreType(c.fit_score)" class="scaffold-fit-tag">
+                  {{ c.fit_score }}
+                </el-tag>
+                <span class="muted sel-reason">{{ c.reason }}</span>
+              </el-radio>
+              <el-radio :value="SELF_DEV" class="sel-radio">
+                <span class="muted">🔧 自研（无合适开源，生成时从零写骨架）</span>
+              </el-radio>
+            </el-radio-group>
+          </div>
+          <div class="detail-actions">
+            <el-button @click="startEditItems">✏️ 改条目重选</el-button>
+            <el-button type="success" :disabled="!allChosen" :loading="scaffoldBuilding"
+              @click="generateScaffold">🏗 生成脚手架</el-button>
+          </div>
+          <div v-if="!allChosen" class="muted">还有条目未选完（自研也算一种选择）。</div>
+        </template>
+
+        <!-- 生成完成：zip 下载 + 构建信息 + 重生成 -->
+        <template v-else-if="scaffoldDetail.status === 'built' && scaffoldDetail.build?.zip_url">
+          <h4>脚手架已生成</h4>
+          <div class="detail-stats">
+            <el-tag type="success">📦 {{ scaffoldDetail.build.file_count }} 个文件</el-tag>
+            <el-tag type="info">{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB</el-tag>
+            <el-tag v-if="scaffoldDetail.build.turns" type="warning">
+              {{ scaffoldDetail.build.turns }} 轮 / ${{ (scaffoldDetail.build.cost_usd || 0).toFixed(2) }}
+            </el-tag>
+            <el-tag v-if="scaffoldDetail.build.cache_hit" type="primary">⚡ 产物缓存命中</el-tag>
+          </div>
+          <p v-if="scaffoldDetail.build.base">
+            <b>base 主干：</b>
+            <a :href="`https://github.com/${scaffoldDetail.build.base}`" target="_blank" class="repo-name">
+              {{ scaffoldDetail.build.base }}
+            </a>
+            <span class="muted">（{{ scaffoldDetail.build.base_rationale }}）</span>
+          </p>
+          <p v-if="scaffoldDetail.build.mounting" class="muted">{{ scaffoldDetail.build.mounting }}</p>
+
+          <h4>六件套清单</h4>
+          <div class="six-list">
+            <div v-for="f in sixFiles" :key="f" class="six-item">✅ {{ f }}</div>
+          </div>
+          <el-alert v-if="(scaffoldDetail.build.warnings || []).length" type="warning" :closable="false"
+            class="task-alert">
+            <template #title>
+              License 提示：{{ scaffoldDetail.build.warnings.join('；') }}（自用不受影响，对外分发需注意）
+            </template>
+          </el-alert>
+
+          <div class="detail-actions">
+            <el-button type="primary" @click="downloadZip">⬇️ 下载 zip（{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB）</el-button>
+            <el-button :loading="scaffoldBuilding" @click="generateScaffold">🔄 重新生成</el-button>
+            <el-tooltip content="回到选型改组件后再生成；同组合会命中产物缓存不重跑" placement="top">
+              <el-button @click="reselectScaffold">改选型</el-button>
+            </el-tooltip>
+          </div>
+        </template>
+
+        <div v-else-if="scaffoldDetail.status === 'building'" class="muted">
+          Agent 生成进行中（写项目骨架 + 六件套，预计数分钟），进度见顶部任务面板，完成后
+          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        </div>
+
+        <div v-else-if="scaffoldDetail.status === 'selecting'" class="muted">
+          条目选型进行中（每条目检索候选 + 双轨评分），任务完成后
+          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        </div>
+
+        <div v-else-if="scaffoldDetail.status === 'matching'" class="muted">
+          匹配进行中（LLM 归纳 + 双通道检索 + 双轨评分），任务完成后
+          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        </div>
+      </template>
+    </el-drawer>
+
+    <!-- 技能运行参数对话框：声明了 arguments 的技能渲染结构化表单（把「执行中问用户」提前到提交前） -->    <el-dialog v-model="skillDialog" :title="`运行 /${currentSkill?.name}`" width="560px">
       <p v-if="currentSkill" class="muted">{{ currentSkill.description }}</p>
 
       <template v-if="hasSkillForm">
@@ -673,10 +954,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  deleteIndustry, getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues,
-  getRepo, getRepos, getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
+  BASE, adoptScaffold, confirmScaffoldItems, createScaffoldRequest, deleteIndustry, getConfig,
+  getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos, getReport,
+  getScaffold, getScaffolds, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
   postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
-  runAgent,
+  rematchScaffold, runAgent, splitScaffold, submitScaffoldSelection,
 } from './api'
 
 const activeTab = ref('repos')
@@ -711,6 +993,17 @@ const industryReport = ref(null)
 const tagging = ref(false)
 const analyzing = ref(false)
 const translating = ref(false)
+// 脚手架（一句话需求 → 框架匹配 → 拆条选型 → 生成 zip）
+const scaffoldInput = ref('')
+const scaffoldRunning = ref(false)
+const scaffoldRematching = ref(false)
+const scaffolds = ref([])
+const scaffoldsLoading = ref(false)
+const scaffoldPage = ref(1)
+const scaffoldPageSize = 20
+const scaffoldTotal = ref(0)
+const scaffoldVisible = ref(false)
+const scaffoldDetail = ref(null)
 const picked = ref([])
 const config = ref(null)
 const detailVisible = ref(false)
@@ -828,6 +1121,9 @@ const TASK_TYPE_LABELS = {
   tagging: '项目自动打标',
   analyze: '批量精析',
   translate: '中文简介翻译',
+  scaffold_match: '脚手架框架匹配',
+  scaffold_select: '脚手架条目选型',
+  scaffold_build: '脚手架生成',
 }
 
 /** 面板头部标识任务本身：连发多条时面板会在任务间切换（前一个结束就接手下一个运行中的），
@@ -838,6 +1134,9 @@ function panelLabel(t) {
   if (t.type === 'skill') return `/${t.payload?.skill || '技能'} ${t.payload?.args || ''}`.trim()
   if (t.type === 'industry') return `🧭 行业分析 · ${t.payload?.args?.[0] || ''}`
   if (t.type === 'analyze') return `🔬 批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
+  if (t.type === 'scaffold_match') return `🏗 需求 #${t.payload?.request_id ?? '?'} 框架匹配`
+  if (t.type === 'scaffold_select') return `🏗 需求 #${t.payload?.request_id ?? '?'} 条目选型`
+  if (t.type === 'scaffold_build') return `🏗 需求 #${t.payload?.request_id ?? '?'} 生成脚手架`
   return TASK_TYPE_LABELS[t.type] || t.type
 }
 
@@ -1086,6 +1385,292 @@ async function openIndustry(id) {
   }
 }
 
+// ---------- 脚手架 ----------
+
+const SCAFFOLD_STATUS = {
+  matching: ['匹配中', 'primary'], matched: ['已匹配', 'success'],
+  done_adopt: ['已采用', 'info'], splitting: ['拆条中', 'primary'],
+  split: ['待确认条目', 'warning'], selecting: ['选型中', 'primary'],
+  selected: ['已选型', 'success'], building: ['生成中', 'primary'],
+  built: ['已生成', 'success'],
+}
+
+function scaffoldStatus(s) {
+  const [label, type] = SCAFFOLD_STATUS[s] || [s, 'info']
+  return { label, type }
+}
+
+async function loadScaffolds() {
+  scaffoldsLoading.value = true
+  try {
+    const data = await getScaffolds({
+      limit: scaffoldPageSize,
+      offset: (scaffoldPage.value - 1) * scaffoldPageSize,
+    })
+    scaffolds.value = data.requests
+    scaffoldTotal.value = data.total
+  } catch (e) {
+    ElMessage.error(`加载脚手架需求失败：${e.message}`)
+  } finally {
+    scaffoldsLoading.value = false
+  }
+}
+
+function resetScaffoldPage() {
+  scaffoldPage.value = 1
+  loadScaffolds()
+}
+
+async function runScaffold() {
+  const text = scaffoldInput.value.trim()
+  if (!text) return
+  scaffoldRunning.value = true
+  try {
+    const { task_id: taskId, request_id: requestId } = await createScaffoldRequest(text)
+    ElMessage.success('需求匹配已提交：LLM 归纳 → 双通道检索 → 双轨评分，进度见顶部面板')
+    scaffoldInput.value = ''
+    resetScaffoldPage()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      if (scaffoldVisible.value) openScaffold(requestId) // 抽屉开着就原地刷新结果
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldRunning.value = false
+  }
+}
+
+async function openScaffold(id) {
+  try {
+    const detail = await getScaffold(id)
+    scaffoldDetail.value = detail
+    initScaffoldEdit(detail)
+    scaffoldVisible.value = true
+  } catch (e) {
+    ElMessage.error(`加载需求详情失败：${e.message}`)
+  }
+}
+
+/** 改话重跑（回退）：弹输入框预填原话，清掉匹配产出重新提交 */
+async function rematchScaffoldRow() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  let text
+  try {
+    ({ value: text } = await ElMessageBox.prompt('修改需求描述（清空则用原话重跑）', '重新匹配', {
+      inputValue: row.raw_text, inputType: 'textarea', confirmButtonText: '重新匹配',
+    }))
+  } catch { /* 取消 */ return }
+  scaffoldRematching.value = true
+  try {
+    const { task_id: taskId } = await rematchScaffold(row.id, (text || '').trim())
+    ElMessage.success('已重新提交匹配，进度见顶部面板')
+    scaffoldVisible.value = false
+    loadScaffolds()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      openScaffold(row.id)
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldRematching.value = false
+  }
+}
+
+// ---------- 采用分支（终态：clone 地址 + 评估报告） ----------
+
+const adoptingRepo = ref('')
+
+const adoptCloneUrl = computed(() =>
+  scaffoldDetail.value?.adopt_repo ? `https://github.com/${scaffoldDetail.value.adopt_repo}.git` : '')
+const adoptMdHtml = computed(() => mdToHtml(scaffoldDetail.value?.adopt_report_md || ''))
+
+/** 复制文本到剪贴板（拒访时兜底亮出内容），课程命令与 clone 地址共用 */
+async function copyText(text, what) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(`已复制${what}`)
+  } catch {
+    ElMessage.info(`剪贴板不可用，请手动复制：${text}`)
+  }
+}
+
+/** 采用候选：确认后同步生成评估报告（拉 README + 单次 LLM，约 5-15 秒） */
+async function adoptCandidate(cand) {
+  const row = scaffoldDetail.value
+  if (!row) return
+  try {
+    await ElMessageBox.confirm(
+      `采用 ${cand.full_name} 作为项目起点？将生成采用评估报告（约 5-15 秒），该需求就此完结。`,
+      '采用确认', { type: 'info', confirmButtonText: '采用' })
+  } catch { /* 取消 */ return }
+  adoptingRepo.value = cand.full_name
+  try {
+    const res = await adoptScaffold(row.id, cand.full_name)
+    ElMessage.success(res.cached ? '该仓库已有评估报告' : '已采用，评估报告已生成')
+    await openScaffold(row.id) // 原地刷新成 done_adopt 态
+    loadScaffolds()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    adoptingRepo.value = ''
+  }
+}
+
+// ---------- 拆条与条目选型（V2） ----------
+
+const STACK_OPTIONS = ['Python', 'Java', 'JavaScript', 'TypeScript', 'Go', 'Rust', 'C++', 'C#']
+const SELF_DEV = '__self__' // 选型 radio 的「自研」哨兵值
+const splittingScaffold = ref(false)
+const scaffoldSelecting = ref(false)
+const splitItems = ref([])     // 条目编辑副本（kw = keywords 逗号串）
+const splitStack = ref('')
+const editingItems = ref(false) // selected 态点「改条目重选」切回编辑面板
+const selChoices = ref({})      // {条目 no: full_name | SELF_DEV}
+
+/** 打开抽屉时初始化对应态的本地编辑副本 */
+function initScaffoldEdit(detail) {
+  editingItems.value = false
+  reselecting.value = false
+  selChoices.value = {}
+  splitItems.value = (detail.items || []).map((it) => ({
+    ...it, kw: (it.keywords || []).join(', '),
+  }))
+  splitStack.value = detail.tech_stack || ''
+  for (const it of detail.items || []) {
+    if (it.selected) selChoices.value[it.no] = it.selected
+    else if (it.self_dev) selChoices.value[it.no] = SELF_DEV
+  }
+}
+
+function addSplitItem() {
+  splitItems.value.push({ no: splitItems.value.length + 1, name: '', desc: '', kw: '',
+    candidates: [], selected: null, self_dev: false })
+}
+
+/** 拆条（同步 2-10s；matched 态入口与「重新拆条」共用，后者覆盖编辑） */
+async function runSplit() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  if (editingItems.value || row.status === 'split') {
+    try {
+      await ElMessageBox.confirm('重新拆条会覆盖当前编辑的条目，继续？', '重新拆条', { type: 'warning' })
+    } catch { /* 取消 */ return }
+  }
+  splittingScaffold.value = true
+  try {
+    const res = await splitScaffold(row.id)
+    ElMessage.success(res.cached ? '命中拆解缓存，条目秒出' : `拆出 ${res.items.length} 条技术条目`)
+    await openScaffold(row.id) // 原地刷新成 split 态
+    loadScaffolds()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    splittingScaffold.value = false
+  }
+}
+
+/** 条目确认 → 提交条目级选型任务（focusTask 跟踪，完成后原地刷 selected 态） */
+async function confirmItems() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  const items = splitItems.value.filter((it) => it.name.trim())
+  if (!items.length) {
+    ElMessage.warning('至少保留一个条目（名称不能为空）')
+    return
+  }
+  scaffoldSelecting.value = true
+  try {
+    const { task_id: taskId } = await confirmScaffoldItems(
+      row.id,
+      items.map(({ name, desc, kw }) => ({
+        name: name.trim(), desc: desc.trim(),
+        keywords: kw.split(/[,，]/).map((k) => k.trim()).filter(Boolean),
+      })),
+      splitStack.value,
+    )
+    ElMessage.success('选型任务已提交：每条目检索候选并双轨评分，进度见顶部面板')
+    editingItems.value = false
+    await openScaffold(row.id) // 刷成 selecting 态
+    loadScaffolds()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      if (scaffoldVisible.value) openScaffold(row.id)
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldSelecting.value = false
+  }
+}
+
+/** selected 态点「改条目重选」：切回编辑面板（重确认会重跑选型，fit 缓存兜成本） */
+function startEditItems() {
+  editingItems.value = true
+}
+
+/** 全部条目都有归属（候选或自研）才能生成 */
+const allChosen = computed(() => {
+  const items = scaffoldDetail.value?.items || []
+  return items.length > 0 && items.every((it) => selChoices.value[it.no])
+})
+
+// ---------- 生成（V3） ----------
+
+const scaffoldBuilding = ref(false)
+const reselecting = ref(false) // built 态点「改选型」：切回选型面板
+const sixFiles = computed(() => {
+  const b = scaffoldDetail.value?.build
+  if (!b) return []
+  return ['README.md（启动说明）', '前端页面', 'docs/research.md（行业调研）',
+    'docs/requirement.md（原始需求）', 'docs/architecture.md（架构）', 'LICENSES.md']
+    .filter((f) => f !== '前端页面' || b.file_count > 0)
+})
+
+/** 生成脚手架（selected 态首发 / built 态重新生成共用）：提交选型 → focusTask → built */
+async function generateScaffold() {
+  const row = scaffoldDetail.value
+  if (!row || !allChosen.value) {
+    ElMessage.warning('还有条目未选完（自研也算一种选择）')
+    return
+  }
+  const selections = (row.items || []).map((it) => ({
+    no: it.no,
+    full_name: selChoices.value[it.no] === SELF_DEV ? null : selChoices.value[it.no],
+  }))
+  scaffoldBuilding.value = true
+  try {
+    const { task_id: taskId } = await submitScaffoldSelection(row.id, selections)
+    ElMessage.success('生成任务已提交：Agent 整合选型产出可启动骨架（数分钟），进度见顶部面板')
+    reselecting.value = false
+    await openScaffold(row.id) // 刷成 building 态
+    loadScaffolds()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      if (scaffoldVisible.value) openScaffold(row.id)
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldBuilding.value = false
+  }
+}
+
+function downloadZip() {
+  const url = scaffoldDetail.value?.build?.zip_url
+  if (url) window.open(BASE + url, '_blank')
+}
+
+function reselectScaffold() {
+  reselecting.value = true
+}
+
 /** 报告项目按子方向分组（保持出现顺序） */
 const industryGroups = computed(() => {
   const groups = {}
@@ -1200,7 +1785,7 @@ async function copyTech(row) {
 }
 
 function openCourse(id, hint) {
-  window.open(`/courses/${id}/index.html`, '_blank')
+  window.open(`${BASE}/courses/${id}/index.html`, '_blank')
   if (hint) ElMessage.info(hint)
 }
 
@@ -1427,6 +2012,7 @@ watch(activeTab, (tab) => {
   if (tab === 'issues' && issues.value.length === 0) loadIssues()
   if (tab === 'issues') loadIssueRepos() // 每次进入都刷新：贡献分析可能新增了有 issue 的项目
   if (tab === 'industries') { loadIndustries(); loadTags() } // 报告与标签都可能被新任务更新
+  if (tab === 'scaffold') loadScaffolds() // 每次进入都刷新：匹配任务可能刚改状态
   if (tab === 'learning') loadCourses() // 每次进入都刷新，/tech 生成后能看到新课程
   if (tab === 'skills') { loadSkills(); loadSkillTasks() }
 })
@@ -1574,4 +2160,29 @@ h4 { margin: 18px 0 8px; }
 .md-body p { margin: 8px 0; }
 .md-body ul { margin: 8px 0; padding-left: 22px; }
 .md-body a { color: #409eff; }
+
+/* 脚手架 */
+.scaffold-raw { font-size: 15px; font-weight: 600; color: #24292f; background: #f6f8fa;
+  border-left: 3px solid #409eff; border-radius: 3px; padding: 8px 12px; }
+.scaffold-fit-tag { margin-left: 8px; }
+.adopt-box { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 6px; }
+.adopt-clone { max-width: 560px; }
+.split-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.stack-select { width: 140px; }
+.split-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #eef1f5; }
+.split-no { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: #409eff;
+  color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; margin-top: 4px; }
+.split-fields { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.split-line1 { display: flex; gap: 8px; align-items: center; }
+.split-name { width: 180px; flex-shrink: 0; }
+.split-kw { flex: 1; }
+.sel-item { padding: 10px 0; border-bottom: 1px dashed #eef1f5; }
+.sel-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+.sel-desc { font-size: 12px; }
+.sel-radios { display: flex; flex-direction: column; gap: 2px; align-items: normal; }
+.sel-radios .el-radio { margin-right: 0; height: auto; white-space: normal; line-height: 1.7; }
+.sel-reason { font-size: 12px; }
+.six-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 16px; margin-bottom: 12px; }
+.six-item { font-size: 13px; color: #4a5160; }
 </style>

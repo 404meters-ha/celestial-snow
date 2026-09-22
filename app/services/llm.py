@@ -384,3 +384,114 @@ async def repo_verdict(
         f"已挑选的 issue：{json.dumps(picked, ensure_ascii=False)}"
     )
     return await llm.chat_json(VERDICT_SYSTEM, user, max_tokens=1500)
+
+
+# ---------- 脚手架：需求归纳 / 适配度评分 ----------
+
+SCAFFOLD_BRIEF_SYSTEM = """你是开源选型助手。用户用一句话描述想做的系统，你负责把需求结构化并规划检索关键词，输出严格 JSON（不要 markdown 围栏）：
+{
+  "domain": "中文领域名（如：待办事项应用、游戏辅助工具、RSS 聚合站）",
+  "summary": "需求理解摘要（60字内：这是什么、给谁用、核心价值）",
+  "features": ["核心功能点，2-5 个"],
+  "scale": "规模判断（个人工具 / 小型服务 / 团队系统 / 平台）",
+  "constraints": ["约束（语言偏好、平台、离线等；没有就空数组）"],
+  "search_keywords": ["GitHub 搜索用的英文关键词/短语，5-8 个，覆盖面要广（含领域词与技术词）"],
+  "tech_hints": ["预计涉及的技术栈关键词（英文小写，如 fastapi, vue, opencv）"]
+}
+search_keywords 决定检索质量：优先「领域名词」（todo app / game bot / rss reader），补 1-2 个技术词；
+不要生僻缩写。全部中文（列表内英文除外）。"""
+
+SCAFFOLD_FIT_SYSTEM = """你是开源选型评估器。给定用户需求（原话+归纳）和候选开源项目清单（GitHub 实测数据），评估每个项目作为该需求**起点**的适配度，输出严格 JSON（不要 markdown 围栏）：
+{"items": [{"full_name": "owner/repo（原样回显，不得改写）",
+  "score": 0-100,
+  "reason": "适配理由（60字内：覆盖了需求的哪些部分、拿来做主干还缺什么）"}]}
+score 口径：整体框架级（拿来即可当项目主干）80+；组件级（只覆盖部分需求，需再组装）50-79；
+边缘相关（只覆盖单一小块）30-49；不相关 <30。必须覆盖输入的每一个 full_name。全部中文（full_name 除外）。"""
+
+
+async def scaffold_brief(llm: LLMClient, text: str, profile: str) -> dict:
+    """一句话需求 → 结构化归纳 + 检索关键词规划。"""
+    user = f"{PROFILE_NOTE.format(profile=profile)}\n\n用户需求：{text}"
+    return await llm.chat_json(SCAFFOLD_BRIEF_SYSTEM, user, max_tokens=1500)
+
+
+async def scaffold_fit_batch(llm: LLMClient, need_text: str, candidates: list[dict],
+                             focus: str = "") -> list[dict]:
+    """批量适配度评分：输入需求文本 + 精简候选，返回 [{full_name, score, reason}]。
+    focus 非空时前置声明评分视角（条目级选组件 ≠ 整体找框架，口径不同）。"""
+    user = (
+        f"{focus}用户需求：\n{need_text}\n\n"
+        f"候选项目（{len(candidates)} 个）：\n{json.dumps(candidates, ensure_ascii=False)}"
+    )
+    data = await llm.chat_json(SCAFFOLD_FIT_SYSTEM, user, max_tokens=3000)
+    return [i for i in data.get("items", []) if str(i.get("full_name", "")).strip()]
+
+
+SCAFFOLD_ADOPT_SYSTEM = """你是开源选型顾问。用户决定采用某个开源框架作为项目起点，基于需求与项目资料写一份采用评估报告，直接输出 Markdown 正文（不要 JSON、不要代码围栏），固定四节：
+## 定位与原理
+这个项目是干什么的、核心设计思想（120字内）
+## 为什么适配
+对照用户需求逐条说明覆盖情况与欠缺（150字内）
+## 上手要点
+clone 之后的安装/启动/目录结构要点，从提供的 README 提取（150字内）
+## 风险与注意
+license、活跃度、学习成本、与需求的缺口（100字内）
+结论先行，信息以 README 为准——README 里没有的不要编。全部中文。"""
+
+
+async def scaffold_adopt_report(llm: LLMClient, raw_text: str, need_brief: dict,
+                                cand: dict, readme: str) -> str:
+    """采用分支的评估报告（Markdown 文本）。"""
+    slim = {k: cand.get(k) for k in ("full_name", "description", "stars", "language",
+                                     "topics", "license", "fit_score", "reason")}
+    user = (
+        f"用户需求：{raw_text}\n需求归纳：{json.dumps(need_brief, ensure_ascii=False)}\n\n"
+        f"采用的项目：{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"README（截断）：\n{readme[:12000] or '（未获取到）'}"
+    )
+    return await llm.chat(SCAFFOLD_ADOPT_SYSTEM, user, max_tokens=2000)
+
+
+SCAFFOLD_SPLIT_SYSTEM = """你是技术方案拆解器。用户的一句话需求不适合整体采用某个现成框架，需要拆成「技术条目」逐块选型开源组件，输出严格 JSON（不要 markdown 围栏）：
+{
+  "tech_stack": "主技术栈（Python/Java/JavaScript/TypeScript/Go/Rust/C++ 之一，综合需求与用户技能画像）",
+  "items": [
+    {"name": "条目名（2-6 字，如：鼠标操作、决策模型、视觉识别、Web 框架、数据存储）",
+     "desc": "这个条目负责什么职责、和别的条目怎么配合（60字内）",
+     "keywords": ["检索开源项目用的英文关键词，2-4 个（如 pyautogui, mouse automation）"]}
+  ]
+}
+拆解规则：
+- 3-8 条，覆盖需求的全部技术面（含前端/交互/数据这类支撑面，不是只有核心算法）
+- 条目是「可独立选型开源组件的技术能力」，不是业务功能清单
+- 一句话里隐含的支撑能力也要拆出来（如游戏辅助工具离不开「窗口/屏幕捕获」）
+- 别太碎：日志、配置这类通用杂项不单独成条"""
+
+
+async def scaffold_split(llm: LLMClient, raw_text: str, need_brief: dict, profile: str) -> dict:
+    """一句话需求 → 技术条目骨架 + 主技术栈推断。"""
+    user = (
+        f"{PROFILE_NOTE.format(profile=profile)}\n\n用户需求：{raw_text}\n"
+        f"需求归纳：{json.dumps(need_brief, ensure_ascii=False)}"
+    )
+    return await llm.chat_json(SCAFFOLD_SPLIT_SYSTEM, user, max_tokens=2000)
+
+
+SCAFFOLD_BASE_SYSTEM = """你是脚手架架构判定器。给定用户需求、技术条目与每条的选型结果，判断哪个**已选中的项目**作为 base 主干（其余组件挂载其上），输出严格 JSON（不要 markdown 围栏）：
+{"base": "owner/repo（必须是选型结果之一）或空字符串（无可挂载的主干）",
+ "rationale": "为什么它适合当主干（80字内）",
+ "mounting": "各组件如何挂载的简述（120字内，如：路由与静态托管都在它上面，存储作为服务层，前端由它托管）"}
+规则：base 优先选 Web 框架 / 应用骨架类的已选项目；条目全是自研、或选中的都是纯库（无主干可言）时 base 给空字符串，生成时用主语言默认骨架。"""
+
+
+async def scaffold_base(llm: LLMClient, raw_text: str, tech_stack: str, items: list[dict]) -> dict:
+    """选型完成后预判 base 主干与挂载关系（生成 agent 的输入之一）。"""
+    slim = [
+        {"no": it.get("no"), "name": it.get("name"),
+         "selected": it.get("selected") or ("自研" if it.get("self_dev") else "未选"),
+         "language": (it.get("candidates") or [{}])[0].get("language", "") if it.get("selected") else ""}
+        for it in items
+    ]
+    user = (f"用户需求：{raw_text}\n主技术栈：{tech_stack or '未定'}\n\n条目与选型：\n"
+            + json.dumps(slim, ensure_ascii=False))
+    return await llm.chat_json(SCAFFOLD_BASE_SYSTEM, user, max_tokens=800)

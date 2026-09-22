@@ -24,9 +24,11 @@ def _days_since(iso: str | None) -> float | None:
         return None
     try:
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
     except ValueError:
         return None
+    if dt.tzinfo is None:  # SQLite DateTime 读出是 naive（无时区 UTC 字符串），补齐再减
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 86400
 
 
 def score_repo(repo: dict, *, period_stars: int = 0, period_days: int = 7) -> tuple[float, dict]:
@@ -141,6 +143,50 @@ def refresh_fixed_hint(issue) -> bool:
     )
     issue.fixed_hint = bool(FIXED_HINT_RE.search(text))
     return issue.fixed_hint
+
+
+# ---------- 脚手架候选的规则适配分（无 LLM 也能粗排） ----------
+
+def scaffold_rule_fit(keywords: list[str], repo: dict, skills: list[str]) -> tuple[float, str]:
+    """脚手架候选的规则分（0-40）：语言命中用户技能 / 检索关键词命中 / 活跃度。
+
+    keywords 是 LLM 规划的 search_keywords + tech_hints（英文小写）；
+    repo 为 GitHub API 风格 dict（language/topics/description/stars/pushed_at）。
+    与 scaffold_fit_batch 的 LLM 分（0-60）合成 fit_score 0-100。
+    """
+    reasons: list[str] = []
+    score = 0.0
+
+    lang = (repo.get("language") or "").lower()
+    lang_aliases = {  # 语言 → 技能画像里可能的写法
+        "python": "python", "java": "java", "javascript": "javascript",
+        "typescript": "typescript", "go": "go", "rust": "rust", "c#": "c#", "c++": "c++",
+    }
+    skill_words = {s.strip().lower() for s in skills if s.strip()}
+    if lang and lang_aliases.get(lang, lang) in skill_words:
+        score += 15
+        reasons.append(f"语言 {repo.get('language')} 命中技能画像 +15")
+
+    haystack = " ".join(
+        [(t or "") for t in (repo.get("topics") or [])] + [repo.get("description") or ""]
+    ).lower()
+    hits = [k for k in keywords if k and k.lower() in haystack]
+    if hits:
+        bonus = min(len(hits) * 5, 15)
+        score += bonus
+        reasons.append(f"关键词命中 {'、'.join(hits[:3])} +{bonus}")
+
+    pushed_days = _days_since(repo.get("pushed_at"))
+    if pushed_days is not None:
+        fresh = _clamp(100 - pushed_days * 3) / 100 * 10  # 33 天内满分 10，线性衰减
+        score += fresh
+        reasons.append(f"最近推送 {pushed_days:.0f} 天前 +{fresh:.0f}")
+    stars = int(repo.get("stars") or 0)
+    if stars >= 5000:
+        score += 5
+        reasons.append(f"高星 {stars} +5")
+
+    return round(_clamp(score, 0, 40), 1), "；".join(reasons) or "无规则命中"
 
 
 # ---------- issue 规则预分（无 LLM 也能出 issue 排行） ----------

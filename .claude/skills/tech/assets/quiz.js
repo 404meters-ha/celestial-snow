@@ -104,7 +104,9 @@
 
     var status = this.root.querySelector('.quiz-status');
     status.textContent = '正在回传平台…';
-    fetch('/api/quiz-results', {
+    // 相对路径回退两级：课程页固定在 courses/{id}/ 顶层，本地解析为 /api/…，
+    // 子路径部署（如 /celestial-snow/）解析为 {BASE}/api/…，两种部署都命中平台
+    fetch('../../api/quiz-results', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -138,7 +140,8 @@
       var el = document.getElementById(containerId);
       if (!el) return;
       el.innerHTML = '<p class="cp-loading">正在加载学习进度…</p>';
-      fetch('/api/courses/' + courseId).then(function (res) {
+      // 同上：相对路径回退两级，兼容子路径部署（见 quiz 回传处的说明）
+      fetch('../../api/courses/' + courseId).then(function (res) {
         if (!res.ok) throw new Error('HTTP ' + res.status);
         return res.json();
       }).then(function (c) {

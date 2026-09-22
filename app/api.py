@@ -18,6 +18,7 @@ from .models import (
     Issue,
     QuizResult,
     Repo,
+    ScaffoldRequest,
     TaskRun,
     utcnow,
 )
@@ -29,7 +30,9 @@ from .services.industry import (
     tagging_pipeline,
     translate_pipeline,
 )
-from .services.llm import LLMNotConfigured
+from .services.scaffold import match_pipeline, select_pipeline, split_items
+from .services.scaffold_builder import build_pipeline
+from .services.llm import LLMClient, LLMNotConfigured, scaffold_adopt_report
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
     MAX_CONTRIB_REPOS,
@@ -468,6 +471,263 @@ async def translate_repos():
     return {"task_id": task_id}
 
 
+# ---------- 脚手架：一句话需求 → 框架匹配 → （采用 / 拆条选型 / 生成 zip） ----------
+
+class ScaffoldCreateRequest(BaseModel):
+    text: str
+
+
+def _scaffold_summary(r: ScaffoldRequest) -> dict:
+    """列表卡片视图：状态 + 一句话原文 + 当前阶段最有信息量的摘要。"""
+    top = (r.framework_candidates or [{}])[0] if r.framework_candidates else {}
+    return {
+        "id": r.id,
+        "raw_text": r.raw_text,
+        "status": r.status,
+        "domain": (r.need_brief or {}).get("domain", ""),
+        "tech_stack": r.tech_stack,
+        "adopt_repo": r.adopt_repo,
+        "candidate_count": len(r.framework_candidates or []),
+        # 已采用显示采用的仓库，其余显示适配度最高的候选
+        "top_candidate": r.adopt_repo if (r.status == "done_adopt" and r.adopt_repo)
+                         else top.get("full_name", ""),
+        "top_fit": None if r.status == "done_adopt" else top.get("fit_score"),
+        "item_count": len(r.items or []),
+        "zip_ready": bool((r.build or {}).get("zip_url")),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+def _scaffold_detail(r: ScaffoldRequest) -> dict:
+    return {
+        **_scaffold_summary(r),
+        "need_brief": r.need_brief or {},
+        "framework_candidates": r.framework_candidates or [],
+        "items": r.items or [],
+        "adopt_report_md": r.adopt_report_md,
+        "build": r.build or {},
+    }
+
+
+@router.post("/scaffold/requests")
+async def create_scaffold_request(req: ScaffoldCreateRequest):
+    """一句话需求 → 创建记录并提交整体匹配任务（候选 5-8 个，双轨适配度）。"""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "请输入一句话需求（如：想做个 RSS 聚合站）")
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    with SessionLocal() as session:
+        row = ScaffoldRequest(raw_text=text)
+        session.add(row)
+        session.commit()
+        request_id = row.id
+    task_id = _submit("scaffold_match", match_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
+@router.get("/scaffold/requests")
+def list_scaffold_requests(limit: int = 20, offset: int = 0):
+    """脚手架需求卡片列表（分页 limit/offset + total，id 倒序）。"""
+    with SessionLocal() as session:
+        stmt = select(ScaffoldRequest)
+        total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+        rows = session.execute(
+            stmt.order_by(ScaffoldRequest.id.desc())
+            .limit(min(limit, 100)).offset(max(offset, 0))
+        ).scalars().all()
+        return {"requests": [_scaffold_summary(r) for r in rows], "total": total}
+
+
+@router.get("/scaffold/requests/{request_id}")
+def scaffold_request_detail(request_id: int):
+    with SessionLocal() as session:
+        r = session.get(ScaffoldRequest, request_id)
+        if r is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        return _scaffold_detail(r)
+
+
+class ScaffoldMatchRequest(BaseModel):
+    text: str = ""  # 空 = 用原话重跑
+
+
+@router.post("/scaffold/requests/{request_id}/match")
+async def rematch_scaffold_request(request_id: int, req: ScaffoldMatchRequest):
+    """改话重跑匹配（回退用）：更新原话、清掉本阶段产出、重置 matching 重新提交。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    text = req.text.strip()
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status == "building":
+            raise HTTPException(400, "脚手架生成中，请稍后再试")
+        if text:
+            row.raw_text = text
+        row.status = "matching"
+        row.need_brief = {}
+        row.framework_candidates = []
+        session.commit()
+    task_id = _submit("scaffold_match", match_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
+def _tag_scaffold_task(task_id: str, request_id: int) -> None:
+    """任务创建即挂 request_id（面板标识「🏗 需求 #n」运行中就可见，不用等管线收尾）。"""
+    with SessionLocal() as session:
+        run = session.get(TaskRun, task_id)
+        if run is not None:
+            run.payload = {**(run.payload or {}), "request_id": request_id}
+            session.commit()
+
+
+class ScaffoldAdoptRequest(BaseModel):
+    full_name: str
+
+
+@router.post("/scaffold/requests/{request_id}/adopt")
+async def adopt_scaffold_request(request_id: int, req: ScaffoldAdoptRequest):
+    """采用候选框架：置 done_adopt（终态）+ 同步生成评估报告（拉 README + 单次 LLM，5-15s）。
+    同一仓库重复采用幂等（报告不重生成）；换仓库采用 = 重新生成报告。"""
+    full_name = req.full_name.strip()
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status == "done_adopt" and row.adopt_repo == full_name and row.adopt_report_md:
+            return {"ok": True, "request_id": request_id, "cached": True}  # 幂等
+        cand = next((c for c in (row.framework_candidates or [])
+                     if c.get("full_name") == full_name), None)
+        if cand is None:
+            raise HTTPException(400, f"{full_name} 不在该需求的候选清单中")
+        if row.status == "building":
+            raise HTTPException(400, "脚手架生成中，请稍后再试")
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+
+    readme = ""
+    github = GitHubClient()
+    try:
+        try:
+            readme = await github.get_readme(full_name)
+        except Exception:  # noqa: BLE001 README 拿不到也能出报告（凭候选元数据）
+            pass
+    finally:
+        await github.close()
+    llm = LLMClient()
+    try:
+        report_md = await scaffold_adopt_report(llm, row.raw_text, row.need_brief or {}, cand, readme)
+    finally:
+        await llm.close()
+
+    with SessionLocal() as session:
+        managed = session.get(ScaffoldRequest, request_id)
+        managed.adopt_repo = full_name
+        managed.adopt_report_md = report_md
+        managed.status = "done_adopt"
+        session.commit()
+    return {"ok": True, "request_id": request_id, "cached": False}
+
+
+@router.post("/scaffold/requests/{request_id}/split")
+async def split_scaffold_request(request_id: int):
+    """拆条（同步 2-10s）：需求 → 3-8 技术条目 + 主技术栈；同一句话重复拆条命中缓存秒回。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status not in ("matched", "split"):
+            raise HTTPException(400, f"当前状态 {row.status} 不能拆条（需先匹配完成）")
+    try:
+        return await split_items(request_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+class ScaffoldItemsRequest(BaseModel):
+    items: list[dict]  # [{name, desc, keywords}]
+    tech_stack: str = ""
+
+
+@router.put("/scaffold/requests/{request_id}/items")
+async def confirm_scaffold_items(request_id: int, req: ScaffoldItemsRequest):
+    """条目确认 → 提交条目级选型任务（每条目检索候选 + 双轨评分）。
+    重复调用 = 改条目重选型（fit 缓存兜住重复评分成本）。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    cleaned: list[dict] = []
+    for it in req.items:
+        name = str(it.get("name", "")).strip()
+        if not name:
+            continue
+        cleaned.append({
+            "no": len(cleaned) + 1, "name": name,
+            "desc": str(it.get("desc", "")).strip(),
+            "keywords": [str(k).strip() for k in (it.get("keywords") or []) if str(k).strip()],
+            "candidates": [], "selected": None, "self_dev": False,
+        })
+    if not cleaned:
+        raise HTTPException(400, "至少保留一个条目（名称不能为空）")
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status not in ("split", "selecting", "selected"):
+            raise HTTPException(400, f"当前状态 {row.status} 不能确认条目（需先拆条）")
+        row.items = cleaned
+        row.status = "selecting"
+        if req.tech_stack.strip():
+            row.tech_stack = req.tech_stack.strip()
+        session.commit()
+    task_id = _submit("scaffold_select", select_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
+class ScaffoldSelectRequest(BaseModel):
+    selections: list[dict]  # [{no, full_name | null}]（null/空 = 该条目自研）
+
+
+@router.post("/scaffold/requests/{request_id}/select")
+async def select_scaffold_components(request_id: int, req: ScaffoldSelectRequest):
+    """逐条选型提交 → 生成任务（Agent 整合产出 zip）。同组合重复提交命中产物缓存不重跑。"""
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status not in ("selected", "building", "built"):
+            raise HTTPException(400, f"当前状态 {row.status} 不能提交选型（需先完成条目候选）")
+        items = [dict(it) for it in (row.items or [])]
+        # 回写每条目的选择：full_name 必须在该条目候选里；空 = 自研
+        by_no = {s.get("no"): (str(s.get("full_name") or "").strip() or None) for s in req.selections}
+        for it in items:
+            choice = by_no.get(it.get("no"))
+            if choice is None:
+                it["self_dev"] = True
+                it["selected"] = None
+                continue
+            if not any(c.get("full_name") == choice for c in (it.get("candidates") or [])):
+                raise HTTPException(400, f"{choice} 不是条目「{it.get('name')}」的候选")
+            it["selected"] = choice
+            it["self_dev"] = False
+        missing = [it.get("name") for it in items if not it.get("selected") and not it.get("self_dev")]
+        if missing:
+            raise HTTPException(400, f"条目未选完：{'、'.join(missing)}（不选即自研，请显式标记）")
+        row.items = items
+        row.status = "building"
+        session.commit()
+    task_id = _submit("scaffold_build", build_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
 # ---------- 配置状态（前端提示用） ----------
 
 @router.get("/config")
@@ -729,7 +989,7 @@ def learning_context(issue_id: int):
 def _course_view(session, course: Course, full: bool = False) -> dict:
     """课程视图：lessons 摊平并附每节 quiz 提交进度。
 
-    full=True 时附带 OSS 发布的逐文件明细（详情页用；列表里不带，避免每门课都驮一份清单）。
+    full=True 时附带发布的逐文件明细（详情页用；列表里不带，避免每门课都驮一份清单）。
     """
     results = session.scalars(
         select(QuizResult).where(QuizResult.course_id == course.id)
@@ -766,7 +1026,7 @@ def _course_view(session, course: Course, full: bool = False) -> dict:
         "lessons": lessons,
         "done_lessons": sum(1 for l in lessons if l["submitted"]),
         "total_lessons": len(lessons),
-        # OSS 发布状态（逐文件明细只在详情里带）
+        # 发布状态（逐文件明细只在详情里带）
         "published": bool(pub.get("entry_url")),
         "publish": publish or None,
     }

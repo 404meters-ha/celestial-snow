@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # PlatformAPI 工具访问的本服务地址（云端部署时改成对外域名）
     platform_api_base: str = "http://127.0.0.1:8100"
 
+    # 子路径部署（如 https://域名/celestial-snow/）：main.py 的中间件剥掉请求路径里的该前缀，
+    # 前端构建 base 也用它（vite.config.js 读同一份 .env）。空 = 根路径部署（本地默认）
+    base_path: str = ""
+
     # 卡奥斯 OSS（对应 Java 侧 com.cosmoplat.hyida:hyida-starter-obs）
     # 该 starter 底层就是 aws-java-sdk-s3 + path-style + us-east-1，Python 侧等价实现用 boto3。
     hyida_obs_enabled: bool = False

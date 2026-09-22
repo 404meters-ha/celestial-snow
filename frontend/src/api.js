@@ -1,4 +1,5 @@
-const BASE = ''
+// 跟随 vite base：根路径部署为 ''（同源根），子路径部署为 '/celestial-snow' 这类前缀
+export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '')
 
 async function apiGet(path) {
   const res = await fetch(BASE + path)
@@ -89,3 +90,32 @@ export const getSkills = () => apiGet('/api/skills')
 export const invokeSkill = (name, args = '') => apiPost(`/api/skills/${name}/invoke`, { args })
 // 页面 AI 命令栏：自由指令（/开头即技能）
 export const runAgent = (prompt) => apiPost('/api/agent/run', { prompt })
+// 脚手架：一句话需求 → 框架匹配（适配度%）→（采用 / 拆条选型 / 生成 zip，分期上线）
+export const createScaffoldRequest = (text) => apiPost('/api/scaffold/requests', { text })
+export const getScaffolds = (params = {}) => {
+  const qs = new URLSearchParams()
+  if (params.limit) qs.set('limit', params.limit)
+  if (params.offset) qs.set('offset', params.offset)
+  return apiGet(`/api/scaffold/requests?${qs}`)
+}
+export const getScaffold = (id) => apiGet(`/api/scaffold/requests/${id}`)
+export const rematchScaffold = (id, text = '') => apiPost(`/api/scaffold/requests/${id}/match`, { text })
+export const adoptScaffold = (id, fullName) =>
+  apiPost(`/api/scaffold/requests/${id}/adopt`, { full_name: fullName })
+// 拆条（同步 2-10s，缓存命中秒回）；条目确认 → 条目级选型任务
+async function apiPut(path, body) {
+  const res = await fetch(BASE + path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.detail || `${res.status} 请求失败`)
+  return data
+}
+export const splitScaffold = (id) => apiPost(`/api/scaffold/requests/${id}/split`)
+export const confirmScaffoldItems = (id, items, techStack) =>
+  apiPut(`/api/scaffold/requests/${id}/items`, { items, tech_stack: techStack })
+// 逐条选型提交（自研条目 full_name 传 null）→ scaffold_build 生成任务
+export const submitScaffoldSelection = (id, selections) =>
+  apiPost(`/api/scaffold/requests/${id}/select`, { selections })
