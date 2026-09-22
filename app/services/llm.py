@@ -384,3 +384,42 @@ async def repo_verdict(
         f"已挑选的 issue：{json.dumps(picked, ensure_ascii=False)}"
     )
     return await llm.chat_json(VERDICT_SYSTEM, user, max_tokens=1500)
+
+
+# ---------- 脚手架：需求归纳 / 适配度评分 ----------
+
+SCAFFOLD_BRIEF_SYSTEM = """你是开源选型助手。用户用一句话描述想做的系统，你负责把需求结构化并规划检索关键词，输出严格 JSON（不要 markdown 围栏）：
+{
+  "domain": "中文领域名（如：待办事项应用、游戏辅助工具、RSS 聚合站）",
+  "summary": "需求理解摘要（60字内：这是什么、给谁用、核心价值）",
+  "features": ["核心功能点，2-5 个"],
+  "scale": "规模判断（个人工具 / 小型服务 / 团队系统 / 平台）",
+  "constraints": ["约束（语言偏好、平台、离线等；没有就空数组）"],
+  "search_keywords": ["GitHub 搜索用的英文关键词/短语，5-8 个，覆盖面要广（含领域词与技术词）"],
+  "tech_hints": ["预计涉及的技术栈关键词（英文小写，如 fastapi, vue, opencv）"]
+}
+search_keywords 决定检索质量：优先「领域名词」（todo app / game bot / rss reader），补 1-2 个技术词；
+不要生僻缩写。全部中文（列表内英文除外）。"""
+
+SCAFFOLD_FIT_SYSTEM = """你是开源选型评估器。给定用户需求（原话+归纳）和候选开源项目清单（GitHub 实测数据），评估每个项目作为该需求**起点**的适配度，输出严格 JSON（不要 markdown 围栏）：
+{"items": [{"full_name": "owner/repo（原样回显，不得改写）",
+  "score": 0-100,
+  "reason": "适配理由（60字内：覆盖了需求的哪些部分、拿来做主干还缺什么）"}]}
+score 口径：整体框架级（拿来即可当项目主干）80+；组件级（只覆盖部分需求，需再组装）50-79；
+边缘相关（只覆盖单一小块）30-49；不相关 <30。必须覆盖输入的每一个 full_name。全部中文（full_name 除外）。"""
+
+
+async def scaffold_brief(llm: LLMClient, text: str, profile: str) -> dict:
+    """一句话需求 → 结构化归纳 + 检索关键词规划。"""
+    user = f"{PROFILE_NOTE.format(profile=profile)}\n\n用户需求：{text}"
+    return await llm.chat_json(SCAFFOLD_BRIEF_SYSTEM, user, max_tokens=1500)
+
+
+async def scaffold_fit_batch(llm: LLMClient, need_text: str, candidates: list[dict]) -> list[dict]:
+    """批量适配度评分：输入需求文本 + 精简候选，返回 [{full_name, score, reason}]。"""
+    user = (
+        f"用户需求：\n{need_text}\n\n"
+        f"候选项目（{len(candidates)} 个）：\n{json.dumps(candidates, ensure_ascii=False)}"
+    )
+    data = await llm.chat_json(SCAFFOLD_FIT_SYSTEM, user, max_tokens=3000)
+    return [i for i in data.get("items", []) if str(i.get("full_name", "")).strip()]

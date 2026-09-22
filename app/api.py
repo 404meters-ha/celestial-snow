@@ -18,6 +18,7 @@ from .models import (
     Issue,
     QuizResult,
     Repo,
+    ScaffoldRequest,
     TaskRun,
     utcnow,
 )
@@ -30,6 +31,7 @@ from .services.industry import (
     tagging_pipeline,
     translate_pipeline,
 )
+from .services.scaffold import match_pipeline
 from .services.llm import LLMNotConfigured
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
@@ -467,6 +469,82 @@ async def translate_repos():
         raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
     task_id = _submit("translate", translate_pipeline)
     return {"task_id": task_id}
+
+
+# ---------- 脚手架：一句话需求 → 框架匹配 → （采用 / 拆条选型 / 生成 zip） ----------
+
+class ScaffoldCreateRequest(BaseModel):
+    text: str
+
+
+def _scaffold_summary(r: ScaffoldRequest) -> dict:
+    """列表卡片视图：状态 + 一句话原文 + 当前阶段最有信息量的摘要。"""
+    top = (r.framework_candidates or [{}])[0] if r.framework_candidates else {}
+    return {
+        "id": r.id,
+        "raw_text": r.raw_text,
+        "status": r.status,
+        "domain": (r.need_brief or {}).get("domain", ""),
+        "tech_stack": r.tech_stack,
+        "adopt_repo": r.adopt_repo,
+        "candidate_count": len(r.framework_candidates or []),
+        "top_candidate": top.get("full_name", ""),
+        "top_fit": top.get("fit_score"),
+        "item_count": len(r.items or []),
+        "zip_ready": bool((r.build or {}).get("zip_url")),
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+        "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+    }
+
+
+def _scaffold_detail(r: ScaffoldRequest) -> dict:
+    return {
+        **_scaffold_summary(r),
+        "need_brief": r.need_brief or {},
+        "framework_candidates": r.framework_candidates or [],
+        "items": r.items or [],
+        "adopt_report_md": r.adopt_report_md,
+        "build": r.build or {},
+    }
+
+
+@router.post("/scaffold/requests")
+async def create_scaffold_request(req: ScaffoldCreateRequest):
+    """一句话需求 → 创建记录并提交整体匹配任务（候选 5-8 个，双轨适配度）。"""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "请输入一句话需求（如：想做个 RSS 聚合站）")
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    with SessionLocal() as session:
+        row = ScaffoldRequest(raw_text=text)
+        session.add(row)
+        session.commit()
+        request_id = row.id
+    task_id = _submit("scaffold_match", match_pipeline, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
+@router.get("/scaffold/requests")
+def list_scaffold_requests(limit: int = 20, offset: int = 0):
+    """脚手架需求卡片列表（分页 limit/offset + total，id 倒序）。"""
+    with SessionLocal() as session:
+        stmt = select(ScaffoldRequest)
+        total = session.scalar(select(func.count()).select_from(stmt.subquery()))
+        rows = session.execute(
+            stmt.order_by(ScaffoldRequest.id.desc())
+            .limit(min(limit, 100)).offset(max(offset, 0))
+        ).scalars().all()
+        return {"requests": [_scaffold_summary(r) for r in rows], "total": total}
+
+
+@router.get("/scaffold/requests/{request_id}")
+def scaffold_request_detail(request_id: int):
+    with SessionLocal() as session:
+        r = session.get(ScaffoldRequest, request_id)
+        if r is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        return _scaffold_detail(r)
 
 
 # ---------- 配置状态（前端提示用） ----------

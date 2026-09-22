@@ -174,7 +174,7 @@ class TaskRun(Base):
     __tablename__ = "task_runs"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # uuid
-    type: Mapped[str] = mapped_column(String(32))  # refresh | contribution | skill | agent | industry | tagging | analyze
+    type: Mapped[str] = mapped_column(String(32))  # refresh | contribution | skill | agent | industry | tagging | analyze | scaffold_*
     status: Mapped[str] = mapped_column(String(16), default="running")  # running|success|failed
     progress: Mapped[str] = mapped_column(Text, default="")
     logs: Mapped[list] = mapped_column(JSON, default=list)
@@ -241,4 +241,48 @@ class QuizResult(Base):
     total: Mapped[int] = mapped_column(Integer, default=0)
     # 每题对错明细：[{"question": str, "chosen": ..., "answer": ..., "correct": bool}]
     detail: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ScaffoldRequest(Base):
+    """脚手架需求主表：一句话 → 整体匹配 → 采用/拆条 → 条目选型 → 生成 zip 的全链路状态机。
+
+    各阶段产出走 JSON 列（候选/条目/生成清单），状态推进与回退规则见
+    doc/scaffold/architecture.md。status：
+    matching → matched → done_adopt（采用分支，终态）
+                      → splitting → split → selecting → selected → building → built
+    任务失败不改 status，重试 = 重复调用对应端点。
+    """
+
+    __tablename__ = "scaffold_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=1, index=True)  # 多用户预留，当前恒为 1
+    raw_text: Mapped[str] = mapped_column(Text)  # 原始一句话
+    need_brief: Mapped[dict] = mapped_column(JSON, default=dict)  # LLM 需求归纳（match 产出）
+    status: Mapped[str] = mapped_column(String(16), default="matching", index=True)
+    tech_stack: Mapped[str] = mapped_column(String(64), default="")  # 主技术栈推断（条目确认时可改）
+    adopt_repo: Mapped[str] = mapped_column(String(255), default="")  # 采用分支选中的仓库
+    # [{"full_name","description","zh_desc","stars","language","topics","license","pushed_at",
+    #   "clone_url","fit_score","rule_score","rule_reason","llm_score","reason","in_lib"}]
+    framework_candidates: Mapped[list] = mapped_column(JSON, default=list)
+    # 技术条目：[{no,name,desc,keywords[],candidates[],selected,self_dev}]（V2 使用）
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    adopt_report_md: Mapped[str] = mapped_column(Text, default="")  # 采用分支的评估报告
+    build: Mapped[dict] = mapped_column(JSON, default=dict)  # 生成结果（V3 使用）
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ScaffoldCache(Base):
+    """脚手架指纹缓存（复用体系的 2/3/4 层）：
+    decompose 需求→条目 ｜ fit (条目,项目)→适配度 ｜ build 组合→产物清单。
+    key = sha1 指纹，内容寻址；生成规范升级时版本号入指纹自动失效。
+    """
+
+    __tablename__ = "scaffold_caches"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # decompose | fit | build
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
