@@ -25,3 +25,5 @@ published/
 
 # Claude 本地配置（技能 .claude/skills/ 会入库，本地设置不入）
 .claude/settings.local.json
+scaffolds/
+doc/scaffold/*.log
