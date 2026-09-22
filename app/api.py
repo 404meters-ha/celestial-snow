@@ -522,6 +522,7 @@ async def create_scaffold_request(req: ScaffoldCreateRequest):
         session.commit()
         request_id = row.id
     task_id = _submit("scaffold_match", match_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
     return {"task_id": task_id, "request_id": request_id}
 
 
@@ -545,6 +546,42 @@ def scaffold_request_detail(request_id: int):
         if r is None:
             raise HTTPException(404, "脚手架需求不存在")
         return _scaffold_detail(r)
+
+
+class ScaffoldMatchRequest(BaseModel):
+    text: str = ""  # 空 = 用原话重跑
+
+
+@router.post("/scaffold/requests/{request_id}/match")
+async def rematch_scaffold_request(request_id: int, req: ScaffoldMatchRequest):
+    """改话重跑匹配（回退用）：更新原话、清掉本阶段产出、重置 matching 重新提交。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    text = req.text.strip()
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status == "building":
+            raise HTTPException(400, "脚手架生成中，请稍后再试")
+        if text:
+            row.raw_text = text
+        row.status = "matching"
+        row.need_brief = {}
+        row.framework_candidates = []
+        session.commit()
+    task_id = _submit("scaffold_match", match_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
+def _tag_scaffold_task(task_id: str, request_id: int) -> None:
+    """任务创建即挂 request_id（面板标识「🏗 需求 #n」运行中就可见，不用等管线收尾）。"""
+    with SessionLocal() as session:
+        run = session.get(TaskRun, task_id)
+        if run is not None:
+            run.payload = {**(run.payload or {}), "request_id": request_id}
+            session.commit()
 
 
 # ---------- 配置状态（前端提示用） ----------

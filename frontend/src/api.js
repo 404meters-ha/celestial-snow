@@ -90,3 +90,13 @@ export const getSkills = () => apiGet('/api/skills')
 export const invokeSkill = (name, args = '') => apiPost(`/api/skills/${name}/invoke`, { args })
 // 页面 AI 命令栏：自由指令（/开头即技能）
 export const runAgent = (prompt) => apiPost('/api/agent/run', { prompt })
+// 脚手架：一句话需求 → 框架匹配（适配度%）→（采用 / 拆条选型 / 生成 zip，分期上线）
+export const createScaffoldRequest = (text) => apiPost('/api/scaffold/requests', { text })
+export const getScaffolds = (params = {}) => {
+  const qs = new URLSearchParams()
+  if (params.limit) qs.set('limit', params.limit)
+  if (params.offset) qs.set('offset', params.offset)
+  return apiGet(`/api/scaffold/requests?${qs}`)
+}
+export const getScaffold = (id) => apiGet(`/api/scaffold/requests/${id}`)
+export const rematchScaffold = (id, text = '') => apiPost(`/api/scaffold/requests/${id}/match`, { text })

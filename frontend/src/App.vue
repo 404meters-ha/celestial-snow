@@ -370,6 +370,70 @@
           </el-table>
         </el-tab-pane>
 
+        <!-- ================= 脚手架 ================= -->
+        <el-tab-pane name="scaffold">
+          <template #label>
+            <span class="tab-label">🏗 脚手架</span>
+          </template>
+
+          <el-alert type="info" :closable="false" show-icon class="task-alert"
+            title="一句话描述想做的系统 → 检索匹配开源框架（适配度%）→ 直接采用或拆成技术条目逐条选型 → 最终整合生成可启动的脚手架 zip（分期上线：当前为整体匹配）" />
+
+          <div class="toolbar">
+            <el-input v-model="scaffoldInput" placeholder="一句话需求，如：想做个流放之路洗装备的工具"
+              clearable class="industry-input" @keyup.enter="runScaffold" />
+            <el-button type="primary" :loading="scaffoldRunning" @click="runScaffold">开始匹配</el-button>
+            <el-button :loading="scaffoldsLoading" @click="resetScaffoldPage">刷新</el-button>
+            <span class="picked-hint">匹配约 30-60 秒，双轨评分（规则 + LLM 语义）</span>
+          </div>
+
+          <el-empty v-if="!scaffoldsLoading && scaffolds.length === 0"
+            description="还没有需求——输入一句话，让平台帮你找现成的开源框架" />
+
+          <el-table v-else :data="scaffolds" v-loading="scaffoldsLoading" row-key="id" stripe>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="scaffoldStatus(row.status).type" size="small">
+                  {{ scaffoldStatus(row.status).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="需求（一句话）" min-width="300">
+              <template #default="{ row }">
+                <a href="javascript:;" class="repo-name" @click="openScaffold(row.id)">{{ row.raw_text }}</a>
+                <div class="repo-desc">{{ row.domain || '（归纳中…）' }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="最佳候选 / 进度" min-width="240">
+              <template #default="{ row }">
+                <template v-if="row.top_candidate">
+                  <span class="repo-name">{{ row.top_candidate }}</span>
+                  <el-tag size="small" :type="scoreType(row.top_fit)" class="scaffold-fit-tag">
+                    适配 {{ row.top_fit }}
+                  </el-tag>
+                </template>
+                <span v-else class="muted">{{ row.status === 'matching' ? '匹配中…' : '—' }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="160">
+              <template #default="{ row }">{{ fmtTime(row.created_at) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="110" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openScaffold(row.id)">
+                  {{ row.status === 'matched' ? '查看候选' : '继续' }}
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="pager">
+            <el-pagination v-model:current-page="scaffoldPage" :page-size="scaffoldPageSize"
+              :total="scaffoldTotal" layout="total, prev, pager, next"
+              @current-change="loadScaffolds" />
+          </div>
+        </el-tab-pane>
+
         <!-- ================= 学习 ================= -->
         <el-tab-pane name="learning">
           <template #label>
@@ -607,8 +671,90 @@
       </template>
     </el-dialog>
 
-    <!-- 技能运行参数对话框：声明了 arguments 的技能渲染结构化表单（把「执行中问用户」提前到提交前） -->
-    <el-dialog v-model="skillDialog" :title="`运行 /${currentSkill?.name}`" width="560px">
+    <!-- 脚手架需求详情抽屉：按状态分态渲染（当前：matched 候选榜；拆条/选型/生成随 V2/V3 上线） -->
+    <el-drawer v-model="scaffoldVisible" :title="`脚手架需求 #${scaffoldDetail?.id || ''}`" size="58%">
+      <template v-if="scaffoldDetail">
+        <div class="detail-stats">
+          <el-tag :type="scaffoldStatus(scaffoldDetail.status).type">
+            {{ scaffoldStatus(scaffoldDetail.status).label }}
+          </el-tag>
+          <el-tag v-if="scaffoldDetail.domain" effect="plain">{{ scaffoldDetail.domain }}</el-tag>
+          <el-tag v-if="scaffoldDetail.candidate_count" type="info" size="small">
+            候选 {{ scaffoldDetail.candidate_count }}
+          </el-tag>
+        </div>
+
+        <p class="scaffold-raw">「{{ scaffoldDetail.raw_text }}」</p>
+
+        <template v-if="scaffoldDetail.need_brief?.summary">
+          <h4>需求理解</h4>
+          <p>{{ scaffoldDetail.need_brief.summary }}</p>
+          <p v-if="(scaffoldDetail.need_brief.features || []).length">
+            <b>核心功能：</b>
+            <el-tag v-for="f in scaffoldDetail.need_brief.features" :key="f" size="small" effect="plain"
+              class="label-tag">{{ f }}</el-tag>
+          </p>
+          <p v-if="scaffoldDetail.need_brief.scale"><b>规模：</b>{{ scaffoldDetail.need_brief.scale }}</p>
+          <p v-if="(scaffoldDetail.need_brief.constraints || []).length" class="muted">
+            约束：{{ scaffoldDetail.need_brief.constraints.join('；') }}
+          </p>
+        </template>
+
+        <template v-if="(scaffoldDetail.framework_candidates || []).length">
+          <h4>候选框架（{{ scaffoldDetail.framework_candidates.length }}，按适配度降序）</h4>
+          <el-table :data="scaffoldDetail.framework_candidates" size="small" row-key="full_name" stripe>
+            <el-table-column label="适配度" width="150" sortable :sort-by="'fit_score'">
+              <template #default="{ row }">
+                <el-tooltip placement="top" :show-after="300">
+                  <template #content>
+                    <div>规则分（语言/关键词/活跃）：{{ row.rule_score }} / 40</div>
+                    <div>LLM 语义分（需求 vs 定位）：{{ row.llm_score }} / 60</div>
+                    <div v-if="row.rule_reason">{{ row.rule_reason }}</div>
+                  </template>
+                  <div class="match-cell">
+                    <el-progress :percentage="Math.min(row.fit_score, 100)" :stroke-width="10"
+                      :color="matchColor(row.fit_score)" class="match-bar" />
+                    <span class="match-num">{{ row.fit_score }}</span>
+                  </div>
+                </el-tooltip>
+              </template>
+            </el-table-column>
+            <el-table-column label="项目" min-width="280">
+              <template #default="{ row }">
+                <div class="repo-title">
+                  <a :href="`https://github.com/${row.full_name}`" target="_blank" class="repo-name">
+                    {{ row.full_name }}
+                  </a>
+                  <el-tag size="small" effect="plain">{{ row.language || '?' }}</el-tag>
+                  <span class="muted">⭐ {{ (row.stars || 0).toLocaleString() }}</span>
+                </div>
+                <div class="repo-desc">{{ row.zh_desc || row.description }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="适配理由" min-width="240">
+              <template #default="{ row }">
+                <span v-if="row.reason">{{ row.reason }}</span>
+                <span v-else class="muted">（LLM 评分未产出，仅规则分）</span>
+              </template>
+            </el-table-column>
+          </el-table>
+
+          <div class="detail-actions">
+            <el-button :loading="scaffoldRematching" @click="rematchScaffoldRow">🔄 重新匹配（可改话）</el-button>
+            <el-tooltip content="拆成技术条目并逐条选型开源组件——第二期上线" placement="top">
+              <el-button disabled>🔧 拆条继续</el-button>
+            </el-tooltip>
+          </div>
+        </template>
+
+        <div v-else-if="scaffoldDetail.status === 'matching'" class="muted">
+          匹配进行中（LLM 归纳 + 双通道检索 + 双轨评分），任务完成后
+          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        </div>
+      </template>
+    </el-drawer>
+
+    <!-- 技能运行参数对话框：声明了 arguments 的技能渲染结构化表单（把「执行中问用户」提前到提交前） -->    <el-dialog v-model="skillDialog" :title="`运行 /${currentSkill?.name}`" width="560px">
       <p v-if="currentSkill" class="muted">{{ currentSkill.description }}</p>
 
       <template v-if="hasSkillForm">
@@ -673,10 +819,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  BASE, deleteIndustry, getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues,
-  getRepo, getRepos, getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
-  postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
-  runAgent,
+  BASE, createScaffoldRequest, deleteIndustry, getConfig, getCourses, getIndustry, getIndustries,
+  getIssueRepos, getIssues, getRepo, getRepos, getReport, getScaffold, getScaffolds, getSkills,
+  getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag, postContribute,
+  postIndustryParse, postIndustryRuns, postRefresh, postTranslate, rematchScaffold, runAgent,
 } from './api'
 
 const activeTab = ref('repos')
@@ -711,6 +857,17 @@ const industryReport = ref(null)
 const tagging = ref(false)
 const analyzing = ref(false)
 const translating = ref(false)
+// 脚手架（一句话需求 → 框架匹配 → 拆条选型 → 生成 zip）
+const scaffoldInput = ref('')
+const scaffoldRunning = ref(false)
+const scaffoldRematching = ref(false)
+const scaffolds = ref([])
+const scaffoldsLoading = ref(false)
+const scaffoldPage = ref(1)
+const scaffoldPageSize = 20
+const scaffoldTotal = ref(0)
+const scaffoldVisible = ref(false)
+const scaffoldDetail = ref(null)
 const picked = ref([])
 const config = ref(null)
 const detailVisible = ref(false)
@@ -828,6 +985,7 @@ const TASK_TYPE_LABELS = {
   tagging: '项目自动打标',
   analyze: '批量精析',
   translate: '中文简介翻译',
+  scaffold_match: '脚手架框架匹配',
 }
 
 /** 面板头部标识任务本身：连发多条时面板会在任务间切换（前一个结束就接手下一个运行中的），
@@ -838,6 +996,7 @@ function panelLabel(t) {
   if (t.type === 'skill') return `/${t.payload?.skill || '技能'} ${t.payload?.args || ''}`.trim()
   if (t.type === 'industry') return `🧭 行业分析 · ${t.payload?.args?.[0] || ''}`
   if (t.type === 'analyze') return `🔬 批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
+  if (t.type === 'scaffold_match') return `🏗 需求 #${t.payload?.request_id ?? '?'} 框架匹配`
   return TASK_TYPE_LABELS[t.type] || t.type
 }
 
@@ -1083,6 +1242,100 @@ async function openIndustry(id) {
     industryVisible.value = true
   } catch (e) {
     ElMessage.error(`加载报告失败：${e.message}`)
+  }
+}
+
+// ---------- 脚手架 ----------
+
+const SCAFFOLD_STATUS = {
+  matching: ['匹配中', 'primary'], matched: ['已匹配', 'success'],
+  done_adopt: ['已采用', 'info'], splitting: ['拆条中', 'primary'],
+  split: ['待确认条目', 'warning'], selecting: ['选型中', 'primary'],
+  selected: ['已选型', 'success'], building: ['生成中', 'primary'],
+  built: ['已生成', 'success'],
+}
+
+function scaffoldStatus(s) {
+  const [label, type] = SCAFFOLD_STATUS[s] || [s, 'info']
+  return { label, type }
+}
+
+async function loadScaffolds() {
+  scaffoldsLoading.value = true
+  try {
+    const data = await getScaffolds({
+      limit: scaffoldPageSize,
+      offset: (scaffoldPage.value - 1) * scaffoldPageSize,
+    })
+    scaffolds.value = data.requests
+    scaffoldTotal.value = data.total
+  } catch (e) {
+    ElMessage.error(`加载脚手架需求失败：${e.message}`)
+  } finally {
+    scaffoldsLoading.value = false
+  }
+}
+
+function resetScaffoldPage() {
+  scaffoldPage.value = 1
+  loadScaffolds()
+}
+
+async function runScaffold() {
+  const text = scaffoldInput.value.trim()
+  if (!text) return
+  scaffoldRunning.value = true
+  try {
+    const { task_id: taskId, request_id: requestId } = await createScaffoldRequest(text)
+    ElMessage.success('需求匹配已提交：LLM 归纳 → 双通道检索 → 双轨评分，进度见顶部面板')
+    scaffoldInput.value = ''
+    resetScaffoldPage()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      if (scaffoldVisible.value) openScaffold(requestId) // 抽屉开着就原地刷新结果
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldRunning.value = false
+  }
+}
+
+async function openScaffold(id) {
+  try {
+    scaffoldDetail.value = await getScaffold(id)
+    scaffoldVisible.value = true
+  } catch (e) {
+    ElMessage.error(`加载需求详情失败：${e.message}`)
+  }
+}
+
+/** 改话重跑（回退）：弹输入框预填原话，清掉匹配产出重新提交 */
+async function rematchScaffoldRow() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  let text
+  try {
+    ({ value: text } = await ElMessageBox.prompt('修改需求描述（清空则用原话重跑）', '重新匹配', {
+      inputValue: row.raw_text, inputType: 'textarea', confirmButtonText: '重新匹配',
+    }))
+  } catch { /* 取消 */ return }
+  scaffoldRematching.value = true
+  try {
+    const { task_id: taskId } = await rematchScaffold(row.id, (text || '').trim())
+    ElMessage.success('已重新提交匹配，进度见顶部面板')
+    scaffoldVisible.value = false
+    loadScaffolds()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      openScaffold(row.id)
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldRematching.value = false
   }
 }
 
@@ -1427,6 +1680,7 @@ watch(activeTab, (tab) => {
   if (tab === 'issues' && issues.value.length === 0) loadIssues()
   if (tab === 'issues') loadIssueRepos() // 每次进入都刷新：贡献分析可能新增了有 issue 的项目
   if (tab === 'industries') { loadIndustries(); loadTags() } // 报告与标签都可能被新任务更新
+  if (tab === 'scaffold') loadScaffolds() // 每次进入都刷新：匹配任务可能刚改状态
   if (tab === 'learning') loadCourses() // 每次进入都刷新，/tech 生成后能看到新课程
   if (tab === 'skills') { loadSkills(); loadSkillTasks() }
 })
@@ -1574,4 +1828,9 @@ h4 { margin: 18px 0 8px; }
 .md-body p { margin: 8px 0; }
 .md-body ul { margin: 8px 0; padding-left: 22px; }
 .md-body a { color: #409eff; }
+
+/* 脚手架 */
+.scaffold-raw { font-size: 15px; font-weight: 600; color: #24292f; background: #f6f8fa;
+  border-left: 3px solid #409eff; border-radius: 3px; padding: 8px 12px; }
+.scaffold-fit-tag { margin-left: 8px; }
 </style>
