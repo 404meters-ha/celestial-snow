@@ -47,6 +47,41 @@ def _check_six(workspace) -> list[str]:
         missing.append("前端页面（index.html / app/page.* / templates 等）")
     return missing
 
+
+def _check_imports(workspace) -> list[str]:
+    """Python 相对导入静态校验：点数 = 上退目录级数，目标文件必须实存。
+    生成高频 bug 类（子包模块引根目录 config 少写一个点 → 运行时 ModuleNotFoundError），
+    E2E 实证两轮均中招，作为平台侧兜底门（JS 侧无静态语法可查，仍靠规范约束）。"""
+    import ast
+
+    problems: list[str] = []
+    for p in sorted(workspace.rglob("*.py")):
+        rel = p.relative_to(workspace).as_posix()
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 语法问题不是本门的职责
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.level > 0):
+                continue
+            base = p.parent
+            for _ in range(node.level - 1):
+                base = base.parent
+            dots = "." * node.level
+            if base == workspace.parent:
+                problems.append(f"{rel}: from {dots}{node.module or ''} 上退越过了项目顶层")
+                continue
+            if node.module:  # from ..x import y → 校验 x 存在（目录也算，兼容命名空间包）
+                cand = base.joinpath(*node.module.split("."))
+                if not (cand.with_suffix(".py").is_file() or cand.is_dir()):
+                    problems.append(f"{rel}: from {dots}{node.module} 目标不存在")
+            else:           # from . import a, b → 逐个校验子模块
+                for alias in node.names:
+                    if not ((base / alias.name).with_suffix(".py").is_file()
+                            or (base / alias.name).is_dir()):
+                        problems.append(f"{rel}: from {dots} import {alias.name} 目标不存在")
+    return problems
+
 SCAFFOLD_SYSTEM = """你是 celestial-snow 平台的脚手架生成 agent，任务：把「用户需求 + 技术条目 + 开源选型」\
 变成一个解压即可启动的项目骨架。
 
@@ -76,6 +111,9 @@ SCAFFOLD_SYSTEM = """你是 celestial-snow 平台的脚手架生成 agent，任�
 - 包型选型（以 pip/npm 包分发的）→ 进依赖清单 requirements.txt / package.json，代码里 import 使用
 - 应用型选型（独立运行的程序）→ vendor/ 下放 README 说明 + clone.sh 克隆脚本，不打包其源码
 - 自研条目（无开源选型）→ 从零写最小骨架
+- 本地文件型组件（向量库/数据库等）优先跨平台方案，避免只支持 Linux/macOS 的组件
+  （E2E 实证：Milvus Lite 无 Windows 轮子，pip 静默跳过 extra、启动即 ConnectionConfigException；
+  可落 SQLite 系或把该限制写进 README 的「已知限制」）
 
 ## 质量要求
 - 文件总量 10-25 个，单文件不超过 ~300 行
@@ -83,8 +121,10 @@ SCAFFOLD_SYSTEM = """你是 celestial-snow 平台的脚手架生成 agent，任�
 - README 启动步骤 ≤3 步，写清端口与访问地址
 - 依赖必须自洽：有 tsconfig.json 就把 typescript 与 @types/* 写进 devDependencies，
   有 .py 脚本就把 Python 依赖写进 requirements.txt——不得依赖框架的「启动时自动安装」
-- import 相对路径必须实存核对（E2E 实测教训）：app/api/**/route.js 引用根目录 lib/ 要退满三级
-  `../../../lib/`，少一级运行时 500；每写完一批文件，用 ListDir 对照一遍所有 import 目标
+- import 相对路径必须实存核对（E2E 实测教训，平台会对 Python 做静态校验）：
+  JS 的 app/api/**/route.js 引根目录 lib/ 要退满三级 `../../../lib/`，少一级运行时 500；
+  Python 点数 = 上退目录级数——子包模块（如 app/services/x.py）引根目录配置必须 `from ..config import`，
+  写 `from .config` 启动即 ModuleNotFoundError；每写完一批文件，用 ListDir 对照一遍所有 import 目标
 - 文档中文；代码命名贴合所选生态的惯例
 """
 
@@ -116,10 +156,10 @@ def build_prompt(raw_text: str, need_brief: dict, items: list[dict],
         lines.append(
             f"{it.get('no')}. {it.get('name')} → {sel}{lic}\n"
             f"   职责：{it.get('desc', '')}\n   选型理由：{it.get('reason', '')}")
-        for c in sorted(it.get("candidates") or [], key=lambda x: -(x.get("fit_score") or 0))[:3]:
+        for c in sorted(it.get("candidates") or [], key=lambda x: -(x.get("fit_score") or 0)):
             mark = "✅ 采纳" if c.get("full_name") == it.get("selected") else "落选"
             lines.append(f"   - 候选 {c.get('full_name')}（适配 {c.get('fit_score')}，{mark}）："
-                         f"{_clip(c.get('reason'))}")
+                         f"{_clip(c.get('reason'))}｜{c.get('clone_url') or ''}")
     lines.append(f"\n### base 框架\n{base_hint}\n")
     lines.append(f"### 工作区\n`{workspace}` —— 所有文件写该目录下，zip 将从该目录打包。\n")
     lines.append(
@@ -142,7 +182,8 @@ def build_fingerprint(items: list[dict], tech_stack: str) -> str:
     for it in sorted(items, key=lambda x: x.get("no", 0)):
         sel = it.get("selected") or ("self" if it.get("self_dev") else "none")
         parts.append(f"{norm(str(it.get('name', '')))}={norm(str(sel))}")
-    parts.append("v2")  # v2：S8 research.md 全链留痕规范（v1 产物无整体匹配/候选对比段，升版失效）
+    parts.append("v3")  # v3：相对导入静态校验门 + Python 点级规范（v2 产物实测有少一个点的 ModuleNotFoundError）；
+    # v2 曾升版引入 research.md 全链留痕素材（整体匹配实录 + 每条目候选对比 + clone_url）
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -246,10 +287,14 @@ async def build_pipeline(github, request_id: int, task_id: str, progress) -> dic
         )
         stats.update(turns=result["num_turns"], cost_usd=result["cost_usd"])
 
-        # 5. 六件套校验（缺失即失败，日志指明缺什么，可重试）
+        # 5. 六件套校验 + 相对导入静态校验（缺失/错级即失败，日志指明问题，可重试）
         missing = _check_six(workspace)
-        if missing:
-            raise ValueError(f"生成产物缺件：{'、'.join(missing)}（可重试；重试会重新生成）")
+        import_problems = _check_imports(workspace)
+        if missing or import_problems:
+            raise ValueError("生成产物校验未过："
+                             + (f"缺件[{'、'.join(missing)}] " if missing else "")
+                             + (f"导入错误[{'；'.join(import_problems)}]" if import_problems else "")
+                             + "（可重试；重试会重新生成）")
 
         # 6. 打包 zip（顶层目录 = 需求 slug）+ 登记产物缓存
         files = [p for p in workspace.rglob("*") if p.is_file()]
