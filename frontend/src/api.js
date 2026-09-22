@@ -1,4 +1,5 @@
-const BASE = ''
+// 跟随 vite base：根路径部署为 ''（同源根），子路径部署为 '/celestial-snow' 这类前缀
+export const BASE = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '')
 
 async function apiGet(path) {
   const res = await fetch(BASE + path)

@@ -34,6 +34,7 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - 输出用精炼的结构化 Markdown。
 - 生成课程走 `/tech` 技能（参数 issue_id，可带 `replace` 表示覆盖已有课程不再询问），不要手工绕过它的流程。
 - 课程有本地与发布目录两份：本地 `localhost:8100/courses/{id}/` 会回传 quiz 进度，发布目录（`/published`）那份是静态副本（可分享、不计进度）。
+- 子路径部署走 `.env` 的 `BASE_PATH`（如 `/celestial-snow`）：后端 `_BasePathStrip` 中间件剥前缀（带/不带前缀都能访问），前端 `vite.config.js` 读同一份 `.env` 定构建 base，`api.js` 的 `BASE` 与课程 quiz.js 的相对回传路径（`../../api/…`）自动跟随；改动后须 `cd frontend && npm run build`。
 - 技能参数表单：SKILL.md frontmatter 可写 `arguments: {单行 JSON}`（type: text/issue/select，`visible_if: "existing_course"` 为目前唯一条件），web 端据此渲染结构化表单，取值按声明顺序空格拼进 args。词表两端同步：`app/services/skill_runner.py::_parse_arguments` 与 `App.vue` 的 paramVisible。
 - 列表分页一律服务端 `limit/offset` + 返回 `total`，排序末尾补 `id` tiebreaker（OFFSET 分页要求全序稳定）；`issues.fixed_hint` 是写入时算好的物化列（摄入/LLM 回写各节点经 `scoring.refresh_fixed_hint` 重算），不要回到「取一批再 Python 排序」的老路。
 - 行业/分类标签统一存 `repos.tags`（JSON 数组，只增不减取并集）；新表/新列走 `db._migrate` 的 inspect+ALTER 模式。

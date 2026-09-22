@@ -673,7 +673,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  deleteIndustry, getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues,
+  BASE, deleteIndustry, getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues,
   getRepo, getRepos, getReport, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
   postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
   runAgent,
@@ -1200,7 +1200,7 @@ async function copyTech(row) {
 }
 
 function openCourse(id, hint) {
-  window.open(`/courses/${id}/index.html`, '_blank')
+  window.open(`${BASE}/courses/${id}/index.html`, '_blank')
   if (hint) ElMessage.info(hint)
 }
 

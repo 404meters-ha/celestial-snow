@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     # PlatformAPI 工具访问的本服务地址（云端部署时改成对外域名）
     platform_api_base: str = "http://127.0.0.1:8100"
 
+    # 子路径部署（如 https://域名/celestial-snow/）：main.py 的中间件剥掉请求路径里的该前缀，
+    # 前端构建 base 也用它（vite.config.js 读同一份 .env）。空 = 根路径部署（本地默认）
+    base_path: str = ""
+
     # 课程发布：本地磁盘落盘（Linux 服务器建议指向 nginx 托管目录；
     # base_url 留空时由本服务静态托管在 /published，见 main.py）
     local_publish_dir: str = "./published"  # 发布根目录：相对项目根或绝对路径

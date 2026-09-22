@@ -101,7 +101,30 @@ def _maybe_cleanup_tags() -> None:
         logger.warning("脏标签清洗检测失败", exc_info=True)
 
 
+class _BasePathStrip:
+    """子路径部署（BASE_PATH=/celestial-snow）时剥掉请求路径里的前缀。
+
+    纯 ASGI 层改 scope，路由/静态挂载/SPA 兜底都按剥掉后的路径工作，因此
+    nginx 直接透传（proxy_pass 不带尾斜杠）即可；nginx 侧先剥掉前缀同样兼容。
+    不带前缀的请求（本地 localhost:8100、Agent SDK 回环调用）原样放行。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        prefix = get_settings().base_path.rstrip("/")
+        path = scope.get("path", "") if scope["type"] == "http" else ""
+        if prefix and (path == prefix or path.startswith(prefix + "/")):
+            scope = dict(scope)
+            scope["path"] = path[len(prefix):] or "/"
+            if scope.get("raw_path"):
+                scope["raw_path"] = scope["path"].encode()
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="celestial-snow", lifespan=lifespan)
+app.add_middleware(_BasePathStrip)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173"],  # vite dev server
