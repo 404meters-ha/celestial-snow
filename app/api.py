@@ -32,7 +32,7 @@ from .services.industry import (
     translate_pipeline,
 )
 from .services.scaffold import match_pipeline
-from .services.llm import LLMNotConfigured
+from .services.llm import LLMClient, LLMNotConfigured, scaffold_adopt_report
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
     MAX_CONTRIB_REPOS,
@@ -488,8 +488,10 @@ def _scaffold_summary(r: ScaffoldRequest) -> dict:
         "tech_stack": r.tech_stack,
         "adopt_repo": r.adopt_repo,
         "candidate_count": len(r.framework_candidates or []),
-        "top_candidate": top.get("full_name", ""),
-        "top_fit": top.get("fit_score"),
+        # 已采用显示采用的仓库，其余显示适配度最高的候选
+        "top_candidate": r.adopt_repo if (r.status == "done_adopt" and r.adopt_repo)
+                         else top.get("full_name", ""),
+        "top_fit": None if r.status == "done_adopt" else top.get("fit_score"),
         "item_count": len(r.items or []),
         "zip_ready": bool((r.build or {}).get("zip_url")),
         "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -582,6 +584,54 @@ def _tag_scaffold_task(task_id: str, request_id: int) -> None:
         if run is not None:
             run.payload = {**(run.payload or {}), "request_id": request_id}
             session.commit()
+
+
+class ScaffoldAdoptRequest(BaseModel):
+    full_name: str
+
+
+@router.post("/scaffold/requests/{request_id}/adopt")
+async def adopt_scaffold_request(request_id: int, req: ScaffoldAdoptRequest):
+    """采用候选框架：置 done_adopt（终态）+ 同步生成评估报告（拉 README + 单次 LLM，5-15s）。
+    同一仓库重复采用幂等（报告不重生成）；换仓库采用 = 重新生成报告。"""
+    full_name = req.full_name.strip()
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status == "done_adopt" and row.adopt_repo == full_name and row.adopt_report_md:
+            return {"ok": True, "request_id": request_id, "cached": True}  # 幂等
+        cand = next((c for c in (row.framework_candidates or [])
+                     if c.get("full_name") == full_name), None)
+        if cand is None:
+            raise HTTPException(400, f"{full_name} 不在该需求的候选清单中")
+        if row.status == "building":
+            raise HTTPException(400, "脚手架生成中，请稍后再试")
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+
+    readme = ""
+    github = GitHubClient()
+    try:
+        try:
+            readme = await github.get_readme(full_name)
+        except Exception:  # noqa: BLE001 README 拿不到也能出报告（凭候选元数据）
+            pass
+    finally:
+        await github.close()
+    llm = LLMClient()
+    try:
+        report_md = await scaffold_adopt_report(llm, row.raw_text, row.need_brief or {}, cand, readme)
+    finally:
+        await llm.close()
+
+    with SessionLocal() as session:
+        managed = session.get(ScaffoldRequest, request_id)
+        managed.adopt_repo = full_name
+        managed.adopt_report_md = report_md
+        managed.status = "done_adopt"
+        session.commit()
+    return {"ok": True, "request_id": request_id, "cached": False}
 
 
 # ---------- 配置状态（前端提示用） ----------

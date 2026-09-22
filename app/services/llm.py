@@ -423,3 +423,28 @@ async def scaffold_fit_batch(llm: LLMClient, need_text: str, candidates: list[di
     )
     data = await llm.chat_json(SCAFFOLD_FIT_SYSTEM, user, max_tokens=3000)
     return [i for i in data.get("items", []) if str(i.get("full_name", "")).strip()]
+
+
+SCAFFOLD_ADOPT_SYSTEM = """你是开源选型顾问。用户决定采用某个开源框架作为项目起点，基于需求与项目资料写一份采用评估报告，直接输出 Markdown 正文（不要 JSON、不要代码围栏），固定四节：
+## 定位与原理
+这个项目是干什么的、核心设计思想（120字内）
+## 为什么适配
+对照用户需求逐条说明覆盖情况与欠缺（150字内）
+## 上手要点
+clone 之后的安装/启动/目录结构要点，从提供的 README 提取（150字内）
+## 风险与注意
+license、活跃度、学习成本、与需求的缺口（100字内）
+结论先行，信息以 README 为准——README 里没有的不要编。全部中文。"""
+
+
+async def scaffold_adopt_report(llm: LLMClient, raw_text: str, need_brief: dict,
+                                cand: dict, readme: str) -> str:
+    """采用分支的评估报告（Markdown 文本）。"""
+    slim = {k: cand.get(k) for k in ("full_name", "description", "stars", "language",
+                                     "topics", "license", "fit_score", "reason")}
+    user = (
+        f"用户需求：{raw_text}\n需求归纳：{json.dumps(need_brief, ensure_ascii=False)}\n\n"
+        f"采用的项目：{json.dumps(slim, ensure_ascii=False)}\n\n"
+        f"README（截断）：\n{readme[:12000] or '（未获取到）'}"
+    )
+    return await llm.chat(SCAFFOLD_ADOPT_SYSTEM, user, max_tokens=2000)

@@ -100,3 +100,5 @@ export const getScaffolds = (params = {}) => {
 }
 export const getScaffold = (id) => apiGet(`/api/scaffold/requests/${id}`)
 export const rematchScaffold = (id, text = '') => apiPost(`/api/scaffold/requests/${id}/match`, { text })
+export const adoptScaffold = (id, fullName) =>
+  apiPost(`/api/scaffold/requests/${id}/adopt`, { full_name: fullName })

@@ -40,17 +40,19 @@
 > top3 = pyoe2-craftpath / PoETheoryCraft / lazy_crafter（全是真实 PoE 洗装项目，边缘项正确降分）。
 > 附带修复：任务面板标识「🏗 需求 #n」改为创建即挂 request_id（原要等管线收尾才可见）。
 
-### S3 采用分支 `[ ]`
+### S3 采用分支 `[x]`（2026-09-22 E2E 通过，V1 完结）
 
 作为用户，我对最适配的框架点「采用」，拿到 clone 地址和评估报告。
 
 范围：`api.py` adopt 端点（同步 LLM 报告）、`llm.py` 评估报告 prompt、前端采用按钮 + clone 复制 + 报告渲染（mdToHtml）。
 
-- [ ] AC1: `POST /{id}/adopt {"full_name"}` → status=done_adopt，详情含 `adopt_repo` 与 `adopt_report_md`（中文 markdown：定位/适配理由/上手要点/风险）
-- [ ] AC2: 前端 done_adopt 态：clone URL 一键复制 + 报告抽屉渲染
-- [ ] AC3: 已 done_adopt 的请求重复 adopt 幂等（返回既有结果，不重复调 LLM）
+- [x] AC1: `POST /{id}/adopt {"full_name"}` → status=done_adopt，详情含 `adopt_repo` 与 `adopt_report_md`（中文 markdown：定位/适配理由/上手要点/风险）
+- [x] AC2: 前端 done_adopt 态：clone URL 一键复制 + 报告抽屉渲染
+- [x] AC3: 已 done_adopt 的请求重复 adopt 幂等（返回既有结果，不重复调 LLM）
 
-依赖：S2。
+> E2E：采用 miniflux/v2 → 报告 904 字（「推荐采用。Miniflux 覆盖 RSS 阅读站的核心需求…」），
+> clone 输入框 + 复制按钮 + 列表「已采用 | miniflux/v2 | 查看报告」；幂等秒回（0.02s）。
+> 已知边界：两个 adopt 并发撞在 14s 生成窗口内会各生成一次（前端 loading 已挡双击，自用可接受）。
 
 ## V2 · 拆条与条目级选型
 

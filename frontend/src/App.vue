@@ -421,7 +421,7 @@
             <el-table-column label="操作" width="110" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="openScaffold(row.id)">
-                  {{ row.status === 'matched' ? '查看候选' : '继续' }}
+                  {{ row.status === 'matched' ? '查看候选' : row.status === 'done_adopt' ? '查看报告' : '继续' }}
                 </el-button>
               </template>
             </el-table-column>
@@ -686,7 +686,24 @@
 
         <p class="scaffold-raw">「{{ scaffoldDetail.raw_text }}」</p>
 
-        <template v-if="scaffoldDetail.need_brief?.summary">
+        <!-- 采用分支（终态）：clone 地址 + 评估报告 -->
+        <template v-if="scaffoldDetail.status === 'done_adopt'">
+          <h4>已采用</h4>
+          <div class="adopt-box">
+            <a :href="`https://github.com/${scaffoldDetail.adopt_repo}`" target="_blank" class="repo-name">
+              {{ scaffoldDetail.adopt_repo }}
+            </a>
+            <el-input :model-value="adoptCloneUrl" readonly size="small" class="adopt-clone">
+              <template #append>
+                <el-button @click="copyText(adoptCloneUrl, 'clone 地址')">复制 clone</el-button>
+              </template>
+            </el-input>
+          </div>
+          <h4>评估报告</h4>
+          <div class="md-body" v-html="adoptMdHtml"></div>
+        </template>
+
+        <template v-else-if="scaffoldDetail.need_brief?.summary">
           <h4>需求理解</h4>
           <p>{{ scaffoldDetail.need_brief.summary }}</p>
           <p v-if="(scaffoldDetail.need_brief.features || []).length">
@@ -700,7 +717,8 @@
           </p>
         </template>
 
-        <template v-if="(scaffoldDetail.framework_candidates || []).length">
+        <template v-if="(scaffoldDetail.framework_candidates || []).length
+          && scaffoldDetail.status !== 'done_adopt'">
           <h4>候选框架（{{ scaffoldDetail.framework_candidates.length }}，按适配度降序）</h4>
           <el-table :data="scaffoldDetail.framework_candidates" size="small" row-key="full_name" stripe>
             <el-table-column label="适配度" width="150" sortable :sort-by="'fit_score'">
@@ -731,10 +749,16 @@
                 <div class="repo-desc">{{ row.zh_desc || row.description }}</div>
               </template>
             </el-table-column>
-            <el-table-column label="适配理由" min-width="240">
+            <el-table-column label="适配理由" min-width="220">
               <template #default="{ row }">
                 <span v-if="row.reason">{{ row.reason }}</span>
                 <span v-else class="muted">（LLM 评分未产出，仅规则分）</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="120" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="success" :loading="adoptingRepo === row.full_name"
+                  @click="adoptCandidate(row)">采用</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -819,9 +843,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  BASE, createScaffoldRequest, deleteIndustry, getConfig, getCourses, getIndustry, getIndustries,
-  getIssueRepos, getIssues, getRepo, getRepos, getReport, getScaffold, getScaffolds, getSkills,
-  getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag, postContribute,
+  BASE, adoptScaffold, createScaffoldRequest, deleteIndustry, getConfig, getCourses, getIndustry,
+  getIndustries, getIssueRepos, getIssues, getRepo, getRepos, getReport, getScaffold, getScaffolds,
+  getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag, postContribute,
   postIndustryParse, postIndustryRuns, postRefresh, postTranslate, rematchScaffold, runAgent,
 } from './api'
 
@@ -1339,6 +1363,46 @@ async function rematchScaffoldRow() {
   }
 }
 
+// ---------- 采用分支（终态：clone 地址 + 评估报告） ----------
+
+const adoptingRepo = ref('')
+
+const adoptCloneUrl = computed(() =>
+  scaffoldDetail.value?.adopt_repo ? `https://github.com/${scaffoldDetail.value.adopt_repo}.git` : '')
+const adoptMdHtml = computed(() => mdToHtml(scaffoldDetail.value?.adopt_report_md || ''))
+
+/** 复制文本到剪贴板（拒访时兜底亮出内容），课程命令与 clone 地址共用 */
+async function copyText(text, what) {
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success(`已复制${what}`)
+  } catch {
+    ElMessage.info(`剪贴板不可用，请手动复制：${text}`)
+  }
+}
+
+/** 采用候选：确认后同步生成评估报告（拉 README + 单次 LLM，约 5-15 秒） */
+async function adoptCandidate(cand) {
+  const row = scaffoldDetail.value
+  if (!row) return
+  try {
+    await ElMessageBox.confirm(
+      `采用 ${cand.full_name} 作为项目起点？将生成采用评估报告（约 5-15 秒），该需求就此完结。`,
+      '采用确认', { type: 'info', confirmButtonText: '采用' })
+  } catch { /* 取消 */ return }
+  adoptingRepo.value = cand.full_name
+  try {
+    const res = await adoptScaffold(row.id, cand.full_name)
+    ElMessage.success(res.cached ? '该仓库已有评估报告' : '已采用，评估报告已生成')
+    await openScaffold(row.id) // 原地刷新成 done_adopt 态
+    loadScaffolds()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    adoptingRepo.value = ''
+  }
+}
+
 /** 报告项目按子方向分组（保持出现顺序） */
 const industryGroups = computed(() => {
   const groups = {}
@@ -1833,4 +1897,7 @@ h4 { margin: 18px 0 8px; }
 .scaffold-raw { font-size: 15px; font-weight: 600; color: #24292f; background: #f6f8fa;
   border-left: 3px solid #409eff; border-radius: 3px; padding: 8px 12px; }
 .scaffold-fit-tag { margin-left: 8px; }
+.adopt-box { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 6px; }
+.adopt-clone { max-width: 560px; }
 </style>
