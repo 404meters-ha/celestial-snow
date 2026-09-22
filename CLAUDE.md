@@ -27,6 +27,16 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到服务器本地磁盘（`LOCAL_PUBLISH_DIR`，默认 `./published`，平台静态托管在 `/published`），返回 `entry_url` 等清单
   （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件；nginx 接管时改 `LOCAL_PUBLISH_BASE_URL`）
 - `GET /api/tasks?limit=N` — 后台任务状态；`GET /api/config` — 配置状态
+- `POST /api/scaffold/requests {"text":"一句话需求"}` — 脚手架匹配任务（status=matching→matched，产出 `need_brief` 与 `framework_candidates` 5-8 个，
+  双轨适配度 fit=规则0-40+LLM0-60）；`GET /api/scaffold/requests` 分页列表 / `GET /{id}` 详情；`POST /{id}/match` 改话重跑
+- `POST /api/scaffold/requests/{id}/adopt {"full_name"}` — 采用分支（同步评估报告，终态 done_adopt）
+- `POST /api/scaffold/requests/{id}/split` — 拆技术条目（同步 2-10 秒，matched→split；同需求命中拆解缓存秒回）；
+  `PUT /{id}/items {"items":[…],"tech_stack":"…"}` — 条目增删改确认 → selecting 任务 → selected（每条目 candidates 3-5 双轨评分，条目关键词入 tags）
+- `POST /api/scaffold/requests/{id}/select {"selections":[{no, full_name|null}]}` — 逐条选型提交（null=自研）→ scaffold_build 任务：
+  base 预判 → Agent 生成六件套（README/前端页/docs 三件/LICENSES）→ 校验打包 → status=built，`build` JSON 含 zip_url/base 主干/license 告警；
+  产物 `GET /scaffolds/{id}/scaffold.zip` 直链下载（main.py 静态挂载，工作区 scaffolds/workspace/ 用完即清）
+- 三层缓存（`scaffold_caches` 表，内容寻址指纹）：拆解（需求→条目）/ fit（条目+项目→分）/ build（组合指纹→产物，同组合重生成秒回不重跑 Agent；
+  生成规范升级靠指纹版本号 v2 自动失效）
 
 ## 约定
 
