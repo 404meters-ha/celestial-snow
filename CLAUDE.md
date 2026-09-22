@@ -36,7 +36,7 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
   base 预判 → Agent 生成六件套（README/前端页/docs 三件/LICENSES）→ 校验打包 → status=built，`build` JSON 含 zip_url/base 主干/license 告警；
   产物 `GET /scaffolds/{id}/scaffold.zip` 直链下载（main.py 静态挂载，工作区 scaffolds/workspace/ 用完即清）
 - 三层缓存（`scaffold_caches` 表，内容寻址指纹）：拆解（需求→条目）/ fit（条目+项目→分）/ build（组合指纹→产物，同组合重生成秒回不重跑 Agent；
-  生成规范升级靠指纹版本号 v2 自动失效）
+  生成规范升级靠指纹版本号升版自动失效（当前 v3：相对导入静态校验门））
 
 ## 约定
 
