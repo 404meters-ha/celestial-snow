@@ -718,7 +718,7 @@
         </template>
 
         <template v-if="(scaffoldDetail.framework_candidates || []).length
-          && scaffoldDetail.status !== 'done_adopt'">
+          && scaffoldDetail.status === 'matched'">
           <h4>候选框架（{{ scaffoldDetail.framework_candidates.length }}，按适配度降序）</h4>
           <el-table :data="scaffoldDetail.framework_candidates" size="small" row-key="full_name" stripe>
             <el-table-column label="适配度" width="150" sortable :sort-by="'fit_score'">
@@ -765,11 +765,80 @@
 
           <div class="detail-actions">
             <el-button :loading="scaffoldRematching" @click="rematchScaffoldRow">🔄 重新匹配（可改话）</el-button>
-            <el-tooltip content="拆成技术条目并逐条选型开源组件——第二期上线" placement="top">
-              <el-button disabled>🔧 拆条继续</el-button>
-            </el-tooltip>
+            <el-button type="warning" :loading="splittingScaffold" @click="runSplit">🔧 拆条继续</el-button>
           </div>
         </template>
+
+        <!-- 拆条编辑面板：split 态 + selected 态的「改条目重选」都走这里 -->
+        <template v-else-if="scaffoldDetail.status === 'split' || editingItems">
+          <h4>技术条目（可增删改，确认后逐条选型开源组件）</h4>
+          <div class="split-bar">
+            <span class="muted">主技术栈：</span>
+            <el-select v-model="splitStack" filterable allow-create size="small" class="stack-select"
+              placeholder="选择或输入">
+              <el-option v-for="s in STACK_OPTIONS" :key="s" :value="s" :label="s" />
+            </el-select>
+            <el-button size="small" @click="addSplitItem">＋ 添加条目</el-button>
+            <el-tooltip content="重新让 LLM 拆解（会覆盖当前编辑；同一句话命中缓存秒出）" placement="top">
+              <el-button size="small" :loading="splittingScaffold" @click="runSplit">🔄 重新拆条</el-button>
+            </el-tooltip>
+          </div>
+          <div v-for="(it, i) in splitItems" :key="i" class="split-row">
+            <span class="split-no">{{ i + 1 }}</span>
+            <div class="split-fields">
+              <div class="split-line1">
+                <el-input v-model="it.name" size="small" placeholder="条目名（如：视觉识别）" class="split-name" />
+                <el-input v-model="it.kw" size="small" placeholder="检索关键词（英文，逗号分隔）" class="split-kw" />
+                <el-button link type="danger" size="small" @click="splitItems.splice(i, 1)">删除</el-button>
+              </div>
+              <el-input v-model="it.desc" size="small" placeholder="职责描述（做什么、怎么与其他条目配合）" />
+            </div>
+          </div>
+          <div class="detail-actions">
+            <el-button type="primary" :loading="scaffoldSelecting" @click="confirmItems">
+              ✅ 确认并选型（{{ splitItems.length }} 条）
+            </el-button>
+          </div>
+        </template>
+
+        <!-- 条目选型面板：逐条勾一个候选或标自研 -->
+        <template v-else-if="scaffoldDetail.status === 'selected'">
+          <h4>逐条选型（每个条目选一个候选开源项目，或标自研）</h4>
+          <div v-for="it in scaffoldDetail.items" :key="it.no" class="sel-item">
+            <div class="sel-head">
+              <b>{{ it.no }}. {{ it.name }}</b>
+              <span class="muted sel-desc">{{ it.desc }}</span>
+            </div>
+            <el-radio-group v-model="selChoices[it.no]" class="sel-radios">
+              <el-radio v-for="c in it.candidates || []" :key="c.full_name"
+                :value="c.full_name" class="sel-radio">
+                <a :href="`https://github.com/${c.full_name}`" target="_blank" class="repo-name"
+                  @click.stop>{{ c.full_name }}</a>
+                <el-tag size="small" :type="scoreType(c.fit_score)" class="scaffold-fit-tag">
+                  {{ c.fit_score }}
+                </el-tag>
+                <span class="muted sel-reason">{{ c.reason }}</span>
+              </el-radio>
+              <el-radio :value="SELF_DEV" class="sel-radio">
+                <span class="muted">🔧 自研（无合适开源，生成时从零写骨架）</span>
+              </el-radio>
+            </el-radio-group>
+          </div>
+          <div class="detail-actions">
+            <el-button @click="startEditItems">✏️ 改条目重选</el-button>
+            <el-tooltip content="Agent 整合所选组件生成可启动脚手架 zip——第三期上线" placement="top">
+              <el-button type="success" :disabled="!allChosen" @click="generatePlaceholder">
+                🏗 生成脚手架
+              </el-button>
+            </el-tooltip>
+          </div>
+          <div v-if="!allChosen" class="muted">还有条目未选完（自研也算一种选择）。</div>
+        </template>
+
+        <div v-else-if="scaffoldDetail.status === 'selecting'" class="muted">
+          条目选型进行中（每条目检索候选 + 双轨评分），任务完成后
+          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        </div>
 
         <div v-else-if="scaffoldDetail.status === 'matching'" class="muted">
           匹配进行中（LLM 归纳 + 双通道检索 + 双轨评分），任务完成后
@@ -843,10 +912,11 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  BASE, adoptScaffold, createScaffoldRequest, deleteIndustry, getConfig, getCourses, getIndustry,
-  getIndustries, getIssueRepos, getIssues, getRepo, getRepos, getReport, getScaffold, getScaffolds,
-  getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze, postAutoTag, postContribute,
-  postIndustryParse, postIndustryRuns, postRefresh, postTranslate, rematchScaffold, runAgent,
+  BASE, adoptScaffold, confirmScaffoldItems, createScaffoldRequest, deleteIndustry, getConfig,
+  getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos, getReport,
+  getScaffold, getScaffolds, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
+  postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
+  rematchScaffold, runAgent, splitScaffold,
 } from './api'
 
 const activeTab = ref('repos')
@@ -1010,6 +1080,7 @@ const TASK_TYPE_LABELS = {
   analyze: '批量精析',
   translate: '中文简介翻译',
   scaffold_match: '脚手架框架匹配',
+  scaffold_select: '脚手架条目选型',
 }
 
 /** 面板头部标识任务本身：连发多条时面板会在任务间切换（前一个结束就接手下一个运行中的），
@@ -1021,6 +1092,7 @@ function panelLabel(t) {
   if (t.type === 'industry') return `🧭 行业分析 · ${t.payload?.args?.[0] || ''}`
   if (t.type === 'analyze') return `🔬 批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
   if (t.type === 'scaffold_match') return `🏗 需求 #${t.payload?.request_id ?? '?'} 框架匹配`
+  if (t.type === 'scaffold_select') return `🏗 需求 #${t.payload?.request_id ?? '?'} 条目选型`
   return TASK_TYPE_LABELS[t.type] || t.type
 }
 
@@ -1328,7 +1400,9 @@ async function runScaffold() {
 
 async function openScaffold(id) {
   try {
-    scaffoldDetail.value = await getScaffold(id)
+    const detail = await getScaffold(id)
+    scaffoldDetail.value = detail
+    initScaffoldEdit(detail)
     scaffoldVisible.value = true
   } catch (e) {
     ElMessage.error(`加载需求详情失败：${e.message}`)
@@ -1401,6 +1475,108 @@ async function adoptCandidate(cand) {
   } finally {
     adoptingRepo.value = ''
   }
+}
+
+// ---------- 拆条与条目选型（V2） ----------
+
+const STACK_OPTIONS = ['Python', 'Java', 'JavaScript', 'TypeScript', 'Go', 'Rust', 'C++', 'C#']
+const SELF_DEV = '__self__' // 选型 radio 的「自研」哨兵值
+const splittingScaffold = ref(false)
+const scaffoldSelecting = ref(false)
+const splitItems = ref([])     // 条目编辑副本（kw = keywords 逗号串）
+const splitStack = ref('')
+const editingItems = ref(false) // selected 态点「改条目重选」切回编辑面板
+const selChoices = ref({})      // {条目 no: full_name | SELF_DEV}
+
+/** 打开抽屉时初始化对应态的本地编辑副本 */
+function initScaffoldEdit(detail) {
+  editingItems.value = false
+  selChoices.value = {}
+  splitItems.value = (detail.items || []).map((it) => ({
+    ...it, kw: (it.keywords || []).join(', '),
+  }))
+  splitStack.value = detail.tech_stack || ''
+  for (const it of detail.items || []) {
+    if (it.selected) selChoices.value[it.no] = it.selected
+    else if (it.self_dev) selChoices.value[it.no] = SELF_DEV
+  }
+}
+
+function addSplitItem() {
+  splitItems.value.push({ no: splitItems.value.length + 1, name: '', desc: '', kw: '',
+    candidates: [], selected: null, self_dev: false })
+}
+
+/** 拆条（同步 2-10s；matched 态入口与「重新拆条」共用，后者覆盖编辑） */
+async function runSplit() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  if (editingItems.value || row.status === 'split') {
+    try {
+      await ElMessageBox.confirm('重新拆条会覆盖当前编辑的条目，继续？', '重新拆条', { type: 'warning' })
+    } catch { /* 取消 */ return }
+  }
+  splittingScaffold.value = true
+  try {
+    const res = await splitScaffold(row.id)
+    ElMessage.success(res.cached ? '命中拆解缓存，条目秒出' : `拆出 ${res.items.length} 条技术条目`)
+    await openScaffold(row.id) // 原地刷新成 split 态
+    loadScaffolds()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    splittingScaffold.value = false
+  }
+}
+
+/** 条目确认 → 提交条目级选型任务（focusTask 跟踪，完成后原地刷 selected 态） */
+async function confirmItems() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  const items = splitItems.value.filter((it) => it.name.trim())
+  if (!items.length) {
+    ElMessage.warning('至少保留一个条目（名称不能为空）')
+    return
+  }
+  scaffoldSelecting.value = true
+  try {
+    const { task_id: taskId } = await confirmScaffoldItems(
+      row.id,
+      items.map(({ name, desc, kw }) => ({
+        name: name.trim(), desc: desc.trim(),
+        keywords: kw.split(/[,，]/).map((k) => k.trim()).filter(Boolean),
+      })),
+      splitStack.value,
+    )
+    ElMessage.success('选型任务已提交：每条目检索候选并双轨评分，进度见顶部面板')
+    editingItems.value = false
+    await openScaffold(row.id) // 刷成 selecting 态
+    loadScaffolds()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      if (scaffoldVisible.value) openScaffold(row.id)
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldSelecting.value = false
+  }
+}
+
+/** selected 态点「改条目重选」：切回编辑面板（重确认会重跑选型，fit 缓存兜成本） */
+function startEditItems() {
+  editingItems.value = true
+}
+
+/** 全部条目都有归属（候选或自研）才能生成 */
+const allChosen = computed(() => {
+  const items = scaffoldDetail.value?.items || []
+  return items.length > 0 && items.every((it) => selChoices.value[it.no])
+})
+
+function generatePlaceholder() {
+  ElMessage.info('脚手架生成管线是第三期（V3），选型结果已保存，敬请期待')
 }
 
 /** 报告项目按子方向分组（保持出现顺序） */
@@ -1900,4 +2076,19 @@ h4 { margin: 18px 0 8px; }
 .adopt-box { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
   background: #f0f9eb; border: 1px solid #e1f3d8; border-radius: 6px; }
 .adopt-clone { max-width: 560px; }
+.split-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.stack-select { width: 140px; }
+.split-row { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px dashed #eef1f5; }
+.split-no { flex-shrink: 0; width: 22px; height: 22px; border-radius: 50%; background: #409eff;
+  color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; margin-top: 4px; }
+.split-fields { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+.split-line1 { display: flex; gap: 8px; align-items: center; }
+.split-name { width: 180px; flex-shrink: 0; }
+.split-kw { flex: 1; }
+.sel-item { padding: 10px 0; border-bottom: 1px dashed #eef1f5; }
+.sel-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+.sel-desc { font-size: 12px; }
+.sel-radios { display: flex; flex-direction: column; gap: 2px; align-items: normal; }
+.sel-radios .el-radio { margin-right: 0; height: auto; white-space: normal; line-height: 1.7; }
+.sel-reason { font-size: 12px; }
 </style>

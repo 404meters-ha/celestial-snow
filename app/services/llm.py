@@ -448,3 +448,28 @@ async def scaffold_adopt_report(llm: LLMClient, raw_text: str, need_brief: dict,
         f"README（截断）：\n{readme[:12000] or '（未获取到）'}"
     )
     return await llm.chat(SCAFFOLD_ADOPT_SYSTEM, user, max_tokens=2000)
+
+
+SCAFFOLD_SPLIT_SYSTEM = """你是技术方案拆解器。用户的一句话需求不适合整体采用某个现成框架，需要拆成「技术条目」逐块选型开源组件，输出严格 JSON（不要 markdown 围栏）：
+{
+  "tech_stack": "主技术栈（Python/Java/JavaScript/TypeScript/Go/Rust/C++ 之一，综合需求与用户技能画像）",
+  "items": [
+    {"name": "条目名（2-6 字，如：鼠标操作、决策模型、视觉识别、Web 框架、数据存储）",
+     "desc": "这个条目负责什么职责、和别的条目怎么配合（60字内）",
+     "keywords": ["检索开源项目用的英文关键词，2-4 个（如 pyautogui, mouse automation）"]}
+  ]
+}
+拆解规则：
+- 3-8 条，覆盖需求的全部技术面（含前端/交互/数据这类支撑面，不是只有核心算法）
+- 条目是「可独立选型开源组件的技术能力」，不是业务功能清单
+- 一句话里隐含的支撑能力也要拆出来（如游戏辅助工具离不开「窗口/屏幕捕获」）
+- 别太碎：日志、配置这类通用杂项不单独成条"""
+
+
+async def scaffold_split(llm: LLMClient, raw_text: str, need_brief: dict, profile: str) -> dict:
+    """一句话需求 → 技术条目骨架 + 主技术栈推断。"""
+    user = (
+        f"{PROFILE_NOTE.format(profile=profile)}\n\n用户需求：{raw_text}\n"
+        f"需求归纳：{json.dumps(need_brief, ensure_ascii=False)}"
+    )
+    return await llm.chat_json(SCAFFOLD_SPLIT_SYSTEM, user, max_tokens=2000)

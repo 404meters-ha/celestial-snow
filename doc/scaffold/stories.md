@@ -56,29 +56,31 @@
 
 ## V2 · 拆条与条目级选型
 
-### S4 技术条目拆解与确认 `[ ]`
+### S4 技术条目拆解与确认 `[x]`（2026-09-22 E2E 通过）
 
 作为用户，框架都不合适时我点「拆条继续」，系统拆出技术条目，我可以增删改后确认。
 
 范围：`api.py` split 端点（同步 LLM）、`llm.py` SCAFFOLD_SPLIT_SYSTEM、拆解缓存、前端条目编辑面板。
 
-- [ ] AC1: matched 态点「拆条」→ 2-10 秒返回 3-8 条条目（编号/名称/职责/关键词）+ 主技术栈推断，status=split
-- [ ] AC2: 条目面板可增/删/改名称、描述、关键词；tech_stack 可改（下拉：Python/Java/JavaScript/Go/其他）
-- [ ] AC3: 「确认并选型」提交 PUT items → status=selecting，任务面板跟踪
-- [ ] AC4: 相同一句话的需求再次拆条命中拆解缓存（LLM 调用数为 0，面板秒出）
+- [x] AC1: matched 态点「拆条」→ 2-10 秒返回 3-8 条条目（编号/名称/职责/关键词）+ 主技术栈推断，status=split
+- [x] AC2: 条目面板可增/删/改名称、描述、关键词；tech_stack 可改（下拉：Python/Java/JavaScript/Go/其他）
+- [x] AC3: 「确认并选型」提交 PUT items → status=selecting，任务面板跟踪
+- [x] AC4: 相同一句话的需求再次拆条命中拆解缓存（LLM 调用数为 0，面板秒出）
 
-依赖：S2。
+> E2E：「流放之路洗装备」拆出 6 条（Web 框架/词缀数据库/概率模拟/成本估算/数据存储/
+> 游戏数据采集），tech_stack=TypeScript；「截图比对」拆出 7 条 tech_stack=Python；
+> 编辑（改名+加条）后确认选型到 selected；缓存秒回 0.08s。
 
-### S5 条目级选型 `[ ]`
+### S5 条目级选型 `[x]`（2026-09-22 E2E 通过，V2 完结）
 
 作为用户，我逐条查看每个技术条目的候选开源项目并勾选（或标自研）。
 
 范围：`scaffold.py::select_pipeline`（每条目串行：关键词→tags 归一→库内+Search→候选 3-5→双轨评分）、前端选型面板。
 
-- [ ] AC1: 选型任务成功后每条目含 candidates 3-5 个（fit 排序，含 reason），status=selected
-- [ ] AC2: 选型面板逐条勾选，支持「自研」（不选任何候选）；全部条目有归属后「生成脚手架」按钮可用（本期为占位，点击提示等待 V3）
-- [ ] AC3: 重新编辑条目（重复 PUT items）会重跑选型且已有 fit 缓存的候选不重复调 LLM
-- [ ] AC4: 选型过程中 tag 归一走 `ensure_tags`（新词入 tags 表）
+- [x] AC1: 选型任务成功后每条目含 candidates 3-5 个（fit 排序，含 reason），status=selected
+- [x] AC2: 选型面板逐条勾选，支持「自研」（不选任何候选）；全部条目有归属后「生成脚手架」按钮可用（本期为占位，点击提示等待 V3）
+- [x] AC3: 重新编辑条目（重复 PUT items）会重跑选型且已有 fit 缓存的候选不重复调 LLM——实测原样重交 `fit_cached: 30`（30 候选全命中，LLM 零调用）
+- [x] AC4: 选型过程中 tag 归一走 `ensure_tags`（新词入 tags 表）——条目名入 tags 表（source=scaffold），候选入库打条目标签（RePoE→「词缀数据库」）
 
 依赖：S4。
 

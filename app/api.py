@@ -31,7 +31,7 @@ from .services.industry import (
     tagging_pipeline,
     translate_pipeline,
 )
-from .services.scaffold import match_pipeline
+from .services.scaffold import match_pipeline, select_pipeline, split_items
 from .services.llm import LLMClient, LLMNotConfigured, scaffold_adopt_report
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
@@ -632,6 +632,63 @@ async def adopt_scaffold_request(request_id: int, req: ScaffoldAdoptRequest):
         managed.status = "done_adopt"
         session.commit()
     return {"ok": True, "request_id": request_id, "cached": False}
+
+
+@router.post("/scaffold/requests/{request_id}/split")
+async def split_scaffold_request(request_id: int):
+    """拆条（同步 2-10s）：需求 → 3-8 技术条目 + 主技术栈；同一句话重复拆条命中缓存秒回。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status not in ("matched", "split"):
+            raise HTTPException(400, f"当前状态 {row.status} 不能拆条（需先匹配完成）")
+    try:
+        return await split_items(request_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+class ScaffoldItemsRequest(BaseModel):
+    items: list[dict]  # [{name, desc, keywords}]
+    tech_stack: str = ""
+
+
+@router.put("/scaffold/requests/{request_id}/items")
+async def confirm_scaffold_items(request_id: int, req: ScaffoldItemsRequest):
+    """条目确认 → 提交条目级选型任务（每条目检索候选 + 双轨评分）。
+    重复调用 = 改条目重选型（fit 缓存兜住重复评分成本）。"""
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（.env 里填 LLM_BASE_URL / LLM_API_KEY）")
+    cleaned: list[dict] = []
+    for it in req.items:
+        name = str(it.get("name", "")).strip()
+        if not name:
+            continue
+        cleaned.append({
+            "no": len(cleaned) + 1, "name": name,
+            "desc": str(it.get("desc", "")).strip(),
+            "keywords": [str(k).strip() for k in (it.get("keywords") or []) if str(k).strip()],
+            "candidates": [], "selected": None, "self_dev": False,
+        })
+    if not cleaned:
+        raise HTTPException(400, "至少保留一个条目（名称不能为空）")
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status not in ("split", "selecting", "selected"):
+            raise HTTPException(400, f"当前状态 {row.status} 不能确认条目（需先拆条）")
+        row.items = cleaned
+        row.status = "selecting"
+        if req.tech_stack.strip():
+            row.tech_stack = req.tech_stack.strip()
+        session.commit()
+    task_id = _submit("scaffold_select", select_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
 
 
 # ---------- 配置状态（前端提示用） ----------

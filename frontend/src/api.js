@@ -102,3 +102,17 @@ export const getScaffold = (id) => apiGet(`/api/scaffold/requests/${id}`)
 export const rematchScaffold = (id, text = '') => apiPost(`/api/scaffold/requests/${id}/match`, { text })
 export const adoptScaffold = (id, fullName) =>
   apiPost(`/api/scaffold/requests/${id}/adopt`, { full_name: fullName })
+// 拆条（同步 2-10s，缓存命中秒回）；条目确认 → 条目级选型任务
+async function apiPut(path, body) {
+  const res = await fetch(BASE + path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.detail || `${res.status} 请求失败`)
+  return data
+}
+export const splitScaffold = (id) => apiPost(`/api/scaffold/requests/${id}/split`)
+export const confirmScaffoldItems = (id, items, techStack) =>
+  apiPut(`/api/scaffold/requests/${id}/items`, { items, tech_stack: techStack })
