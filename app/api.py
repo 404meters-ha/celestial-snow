@@ -32,6 +32,7 @@ from .services.industry import (
     translate_pipeline,
 )
 from .services.scaffold import match_pipeline, select_pipeline, split_items
+from .services.scaffold_builder import build_pipeline
 from .services.llm import LLMClient, LLMNotConfigured, scaffold_adopt_report
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
@@ -687,6 +688,43 @@ async def confirm_scaffold_items(request_id: int, req: ScaffoldItemsRequest):
             row.tech_stack = req.tech_stack.strip()
         session.commit()
     task_id = _submit("scaffold_select", select_pipeline, request_id)
+    _tag_scaffold_task(task_id, request_id)
+    return {"task_id": task_id, "request_id": request_id}
+
+
+class ScaffoldSelectRequest(BaseModel):
+    selections: list[dict]  # [{no, full_name | null}]（null/空 = 该条目自研）
+
+
+@router.post("/scaffold/requests/{request_id}/select")
+async def select_scaffold_components(request_id: int, req: ScaffoldSelectRequest):
+    """逐条选型提交 → 生成任务（Agent 整合产出 zip）。同组合重复提交命中产物缓存不重跑。"""
+    with SessionLocal() as session:
+        row = session.get(ScaffoldRequest, request_id)
+        if row is None:
+            raise HTTPException(404, "脚手架需求不存在")
+        if row.status not in ("selected", "building", "built"):
+            raise HTTPException(400, f"当前状态 {row.status} 不能提交选型（需先完成条目候选）")
+        items = [dict(it) for it in (row.items or [])]
+        # 回写每条目的选择：full_name 必须在该条目候选里；空 = 自研
+        by_no = {s.get("no"): (str(s.get("full_name") or "").strip() or None) for s in req.selections}
+        for it in items:
+            choice = by_no.get(it.get("no"))
+            if choice is None:
+                it["self_dev"] = True
+                it["selected"] = None
+                continue
+            if not any(c.get("full_name") == choice for c in (it.get("candidates") or [])):
+                raise HTTPException(400, f"{choice} 不是条目「{it.get('name')}」的候选")
+            it["selected"] = choice
+            it["self_dev"] = False
+        missing = [it.get("name") for it in items if not it.get("selected") and not it.get("self_dev")]
+        if missing:
+            raise HTTPException(400, f"条目未选完：{'、'.join(missing)}（不选即自研，请显式标记）")
+        row.items = items
+        row.status = "building"
+        session.commit()
+    task_id = _submit("scaffold_build", build_pipeline, request_id)
     _tag_scaffold_task(task_id, request_id)
     return {"task_id": task_id, "request_id": request_id}
 

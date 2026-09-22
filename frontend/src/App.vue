@@ -801,8 +801,8 @@
           </div>
         </template>
 
-        <!-- 条目选型面板：逐条勾一个候选或标自研 -->
-        <template v-else-if="scaffoldDetail.status === 'selected'">
+        <!-- 条目选型面板：逐条勾一个候选或标自研（built 态点「改选型」也回到这里） -->
+        <template v-else-if="scaffoldDetail.status === 'selected' || reselecting">
           <h4>逐条选型（每个条目选一个候选开源项目，或标自研）</h4>
           <div v-for="it in scaffoldDetail.items" :key="it.no" class="sel-item">
             <div class="sel-head">
@@ -826,14 +826,56 @@
           </div>
           <div class="detail-actions">
             <el-button @click="startEditItems">✏️ 改条目重选</el-button>
-            <el-tooltip content="Agent 整合所选组件生成可启动脚手架 zip——第三期上线" placement="top">
-              <el-button type="success" :disabled="!allChosen" @click="generatePlaceholder">
-                🏗 生成脚手架
-              </el-button>
-            </el-tooltip>
+            <el-button type="success" :disabled="!allChosen" :loading="scaffoldBuilding"
+              @click="generateScaffold">🏗 生成脚手架</el-button>
           </div>
           <div v-if="!allChosen" class="muted">还有条目未选完（自研也算一种选择）。</div>
         </template>
+
+        <!-- 生成完成：zip 下载 + 构建信息 + 重生成 -->
+        <template v-else-if="scaffoldDetail.status === 'built' && scaffoldDetail.build?.zip_url">
+          <h4>脚手架已生成</h4>
+          <div class="detail-stats">
+            <el-tag type="success">📦 {{ scaffoldDetail.build.file_count }} 个文件</el-tag>
+            <el-tag type="info">{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB</el-tag>
+            <el-tag v-if="scaffoldDetail.build.turns" type="warning">
+              {{ scaffoldDetail.build.turns }} 轮 / ${{ (scaffoldDetail.build.cost_usd || 0).toFixed(2) }}
+            </el-tag>
+            <el-tag v-if="scaffoldDetail.build.cache_hit" type="primary">⚡ 产物缓存命中</el-tag>
+          </div>
+          <p v-if="scaffoldDetail.build.base">
+            <b>base 主干：</b>
+            <a :href="`https://github.com/${scaffoldDetail.build.base}`" target="_blank" class="repo-name">
+              {{ scaffoldDetail.build.base }}
+            </a>
+            <span class="muted">（{{ scaffoldDetail.build.base_rationale }}）</span>
+          </p>
+          <p v-if="scaffoldDetail.build.mounting" class="muted">{{ scaffoldDetail.build.mounting }}</p>
+
+          <h4>六件套清单</h4>
+          <div class="six-list">
+            <div v-for="f in sixFiles" :key="f" class="six-item">✅ {{ f }}</div>
+          </div>
+          <el-alert v-if="(scaffoldDetail.build.warnings || []).length" type="warning" :closable="false"
+            class="task-alert">
+            <template #title>
+              License 提示：{{ scaffoldDetail.build.warnings.join('；') }}（自用不受影响，对外分发需注意）
+            </template>
+          </el-alert>
+
+          <div class="detail-actions">
+            <el-button type="primary" @click="downloadZip">⬇️ 下载 zip（{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB）</el-button>
+            <el-button :loading="scaffoldBuilding" @click="generateScaffold">🔄 重新生成</el-button>
+            <el-tooltip content="回到选型改组件后再生成；同组合会命中产物缓存不重跑" placement="top">
+              <el-button @click="reselectScaffold">改选型</el-button>
+            </el-tooltip>
+          </div>
+        </template>
+
+        <div v-else-if="scaffoldDetail.status === 'building'" class="muted">
+          Agent 生成进行中（写项目骨架 + 六件套，预计数分钟），进度见顶部任务面板，完成后
+          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        </div>
 
         <div v-else-if="scaffoldDetail.status === 'selecting'" class="muted">
           条目选型进行中（每条目检索候选 + 双轨评分），任务完成后
@@ -916,7 +958,7 @@ import {
   getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos, getReport,
   getScaffold, getScaffolds, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
   postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
-  rematchScaffold, runAgent, splitScaffold,
+  rematchScaffold, runAgent, splitScaffold, submitScaffoldSelection,
 } from './api'
 
 const activeTab = ref('repos')
@@ -1081,6 +1123,7 @@ const TASK_TYPE_LABELS = {
   translate: '中文简介翻译',
   scaffold_match: '脚手架框架匹配',
   scaffold_select: '脚手架条目选型',
+  scaffold_build: '脚手架生成',
 }
 
 /** 面板头部标识任务本身：连发多条时面板会在任务间切换（前一个结束就接手下一个运行中的），
@@ -1093,6 +1136,7 @@ function panelLabel(t) {
   if (t.type === 'analyze') return `🔬 批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
   if (t.type === 'scaffold_match') return `🏗 需求 #${t.payload?.request_id ?? '?'} 框架匹配`
   if (t.type === 'scaffold_select') return `🏗 需求 #${t.payload?.request_id ?? '?'} 条目选型`
+  if (t.type === 'scaffold_build') return `🏗 需求 #${t.payload?.request_id ?? '?'} 生成脚手架`
   return TASK_TYPE_LABELS[t.type] || t.type
 }
 
@@ -1491,6 +1535,7 @@ const selChoices = ref({})      // {条目 no: full_name | SELF_DEV}
 /** 打开抽屉时初始化对应态的本地编辑副本 */
 function initScaffoldEdit(detail) {
   editingItems.value = false
+  reselecting.value = false
   selChoices.value = {}
   splitItems.value = (detail.items || []).map((it) => ({
     ...it, kw: (it.keywords || []).join(', '),
@@ -1575,8 +1620,55 @@ const allChosen = computed(() => {
   return items.length > 0 && items.every((it) => selChoices.value[it.no])
 })
 
-function generatePlaceholder() {
-  ElMessage.info('脚手架生成管线是第三期（V3），选型结果已保存，敬请期待')
+// ---------- 生成（V3） ----------
+
+const scaffoldBuilding = ref(false)
+const reselecting = ref(false) // built 态点「改选型」：切回选型面板
+const sixFiles = computed(() => {
+  const b = scaffoldDetail.value?.build
+  if (!b) return []
+  return ['README.md（启动说明）', '前端页面', 'docs/research.md（行业调研）',
+    'docs/requirement.md（原始需求）', 'docs/architecture.md（架构）', 'LICENSES.md']
+    .filter((f) => f !== '前端页面' || b.file_count > 0)
+})
+
+/** 生成脚手架（selected 态首发 / built 态重新生成共用）：提交选型 → focusTask → built */
+async function generateScaffold() {
+  const row = scaffoldDetail.value
+  if (!row || !allChosen.value) {
+    ElMessage.warning('还有条目未选完（自研也算一种选择）')
+    return
+  }
+  const selections = (row.items || []).map((it) => ({
+    no: it.no,
+    full_name: selChoices.value[it.no] === SELF_DEV ? null : selChoices.value[it.no],
+  }))
+  scaffoldBuilding.value = true
+  try {
+    const { task_id: taskId } = await submitScaffoldSelection(row.id, selections)
+    ElMessage.success('生成任务已提交：Agent 整合选型产出可启动骨架（数分钟），进度见顶部面板')
+    reselecting.value = false
+    await openScaffold(row.id) // 刷成 building 态
+    loadScaffolds()
+    focusTask(taskId, () => {
+      loadScaffolds()
+      if (scaffoldVisible.value) openScaffold(row.id)
+      startPolling()
+    })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    scaffoldBuilding.value = false
+  }
+}
+
+function downloadZip() {
+  const url = scaffoldDetail.value?.build?.zip_url
+  if (url) window.open(BASE + url, '_blank')
+}
+
+function reselectScaffold() {
+  reselecting.value = true
 }
 
 /** 报告项目按子方向分组（保持出现顺序） */
@@ -2091,4 +2183,6 @@ h4 { margin: 18px 0 8px; }
 .sel-radios { display: flex; flex-direction: column; gap: 2px; align-items: normal; }
 .sel-radios .el-radio { margin-right: 0; height: auto; white-space: normal; line-height: 1.7; }
 .sel-reason { font-size: 12px; }
+.six-list { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 16px; margin-bottom: 12px; }
+.six-item { font-size: 13px; color: #4a5160; }
 </style>

@@ -102,19 +102,31 @@
 
 依赖：无（建议与 V1/V2 并行或提前）。
 
-### S7 生成管线 `[ ]`
+### S7 生成管线 `[x]`（2026-09-22 E2E 通过）
 
 作为用户，我选完型后点「生成脚手架」，后台 Agent 产出可启动的 zip 供下载。
 
 范围：`scaffold_builder.py`（base 预判 SCAFFOLD_BASE_SYSTEM → agent_sdk.run → 六件套校验 → zipfile → 产物缓存 → build 回写）、`main.py` 挂载 `/scaffolds`、`api.py` select 端点、前端生成/下载/重生成面板。
 
-- [ ] AC1: select 提交 → scaffold_build 任务 → 成功后 status=built，详情含 zip_url 可下载
-- [ ] AC2: zip 六件套齐全；解压后按 README 三步内启动成功（页面可开 = 验收线）
-- [ ] AC3: 结构化 TODO 存在且标注对应条目与参考项目
-- [ ] AC4: 选型（依赖/vendor 分层）正确落位：包型进依赖清单、应用型进 vendor/ 或 clone 脚本
-- [ ] AC5: 同组合重新生成命中产物缓存秒回（Agent 不重跑）；改任一条目或选型后指纹变化、真重跑
-- [ ] AC6: 生成失败（如缺件）任务 failed、日志指明缺什么、可重试
-- [ ] AC7: build 进度事件实时进任务面板时间线
+- [x] AC1: select 提交 → scaffold_build 任务 → 成功后 status=built，详情含 zip_url 可下载
+- [x] AC2: zip 六件套齐全；解压后按 README 三步内启动成功（页面可开 = 验收线）
+- [x] AC3: 结构化 TODO 存在且标注对应条目与参考项目
+- [x] AC4: 选型（依赖/vendor 分层）正确落位：包型进依赖清单、应用型进 vendor/ 或 clone 脚本
+- [x] AC5: 同组合重新生成命中产物缓存秒回（Agent 不重跑）；改任一条目或选型后指纹变化、真重跑
+- [x] AC6: 生成失败（如缺件）任务 failed、日志指明缺什么、可重试
+- [x] AC7: build 进度事件实时进任务面板时间线
+
+> E2E 实测（请求 #6「流放之路洗装备工具」，6 条目全选开源）：12 轮 / $0.38 / 25 文件 / 18KB，
+> base=vercel/next.js（预判理由与挂载关系回填 build）。启动验收：解压 → npm install →
+> npm run dev → 首页 200（5s），/api/mods 出真实词缀池、/api/craft 出千次模拟+成本+方案对比；
+> TODO 11 处格式统一；nocodb（应用型）落 vendor/clone.sh、包型进 requirements.txt；
+> 缓存重生成秒回（cache_hit=true，0 轮 0 成本），指纹单验改选型/技术栈即变。
+> **E2E 暴露的两类生成质量问题已回写规范**（SCAFFOLD_SYSTEM 质量要求 + 指纹升 v2）：
+> ① tsconfig.json 未配 typescript devDep（触发 Next 启动时自动安装，网络受限即挂起）；
+> ② app/api/**/route.js 引根目录 lib/ 少退一级 import（运行时 500）——修正后 API 全 200。
+> 附带修复：六件套校验的「前端页面」从只认 index.html 扩为 FRONTEND_GLOBS
+> （首跑生成 Next.js app/page.jsx 被误判缺件失败，日志明确指出、重试即过的路径已实证）。
+> v2 指纹同时透传 research.md 全链素材（整体匹配实录 + 每条目候选对比），S8 全链 E2E 验收。
 
 依赖：S5 + S6。
 

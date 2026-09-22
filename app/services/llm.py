@@ -415,10 +415,12 @@ async def scaffold_brief(llm: LLMClient, text: str, profile: str) -> dict:
     return await llm.chat_json(SCAFFOLD_BRIEF_SYSTEM, user, max_tokens=1500)
 
 
-async def scaffold_fit_batch(llm: LLMClient, need_text: str, candidates: list[dict]) -> list[dict]:
-    """批量适配度评分：输入需求文本 + 精简候选，返回 [{full_name, score, reason}]。"""
+async def scaffold_fit_batch(llm: LLMClient, need_text: str, candidates: list[dict],
+                             focus: str = "") -> list[dict]:
+    """批量适配度评分：输入需求文本 + 精简候选，返回 [{full_name, score, reason}]。
+    focus 非空时前置声明评分视角（条目级选组件 ≠ 整体找框架，口径不同）。"""
     user = (
-        f"用户需求：\n{need_text}\n\n"
+        f"{focus}用户需求：\n{need_text}\n\n"
         f"候选项目（{len(candidates)} 个）：\n{json.dumps(candidates, ensure_ascii=False)}"
     )
     data = await llm.chat_json(SCAFFOLD_FIT_SYSTEM, user, max_tokens=3000)
@@ -473,3 +475,23 @@ async def scaffold_split(llm: LLMClient, raw_text: str, need_brief: dict, profil
         f"需求归纳：{json.dumps(need_brief, ensure_ascii=False)}"
     )
     return await llm.chat_json(SCAFFOLD_SPLIT_SYSTEM, user, max_tokens=2000)
+
+
+SCAFFOLD_BASE_SYSTEM = """你是脚手架架构判定器。给定用户需求、技术条目与每条的选型结果，判断哪个**已选中的项目**作为 base 主干（其余组件挂载其上），输出严格 JSON（不要 markdown 围栏）：
+{"base": "owner/repo（必须是选型结果之一）或空字符串（无可挂载的主干）",
+ "rationale": "为什么它适合当主干（80字内）",
+ "mounting": "各组件如何挂载的简述（120字内，如：路由与静态托管都在它上面，存储作为服务层，前端由它托管）"}
+规则：base 优先选 Web 框架 / 应用骨架类的已选项目；条目全是自研、或选中的都是纯库（无主干可言）时 base 给空字符串，生成时用主语言默认骨架。"""
+
+
+async def scaffold_base(llm: LLMClient, raw_text: str, tech_stack: str, items: list[dict]) -> dict:
+    """选型完成后预判 base 主干与挂载关系（生成 agent 的输入之一）。"""
+    slim = [
+        {"no": it.get("no"), "name": it.get("name"),
+         "selected": it.get("selected") or ("自研" if it.get("self_dev") else "未选"),
+         "language": (it.get("candidates") or [{}])[0].get("language", "") if it.get("selected") else ""}
+        for it in items
+    ]
+    user = (f"用户需求：{raw_text}\n主技术栈：{tech_stack or '未定'}\n\n条目与选型：\n"
+            + json.dumps(slim, ensure_ascii=False))
+    return await llm.chat_json(SCAFFOLD_BASE_SYSTEM, user, max_tokens=800)

@@ -113,7 +113,8 @@ async def _search_candidates(github: GitHubClient, keywords: list[str], top_n: i
 
 
 async def _score_candidates(llm: LLMClient, need_text: str, item_fp: str, candidates: list[dict],
-                            skills: list[str], keywords: list[str], stats: dict, log) -> None:
+                            skills: list[str], keywords: list[str], stats: dict, log,
+                            focus: str = "") -> None:
     """就地给候选填双轨分：规则分（全量）+ LLM 语义分（0-100 折算 0-60，fit 缓存优先）+ 合成 fit_score。"""
     llm_pend: list[dict] = []
     for c in candidates:
@@ -131,7 +132,7 @@ async def _score_candidates(llm: LLMClient, need_text: str, item_fp: str, candid
     if llm_pend:
         log(f"LLM 评估 {len(llm_pend)} 个候选的适配度…")
         try:
-            scored = await scaffold_fit_batch(llm, need_text, llm_pend)
+            scored = await scaffold_fit_batch(llm, need_text, llm_pend, focus=focus)
         except Exception as e:  # noqa: BLE001 评分失败不拖垮（候选仍有规则分）
             stats["errors"].append(f"LLM 评分: {e}")
             log(f"LLM 评分失败，退回纯规则分：{e}")
@@ -327,9 +328,11 @@ async def select_pipeline(github: GitHubClient, request_id: int, task_id: str, p
             candidates = await _search_candidates(github, keywords, SELECT_CANDIDATES, log, stats)
             item_fp = _fp(name, item.get("desc") or "", " ".join(keywords))
             need_text = f"{raw_text}｜条目「{name}」：{item.get('desc', '')}"
+            focus = ("【评分视角】这是给单个技术条目选组件，不是给整个需求找框架："
+                     "项目必须能承担该条目的具体职责才算高分，只会做界面的通用框架不算。\n")
             if candidates:
                 await _score_candidates(llm, need_text, item_fp, candidates, skills, keywords,
-                                        stats, log)
+                                        stats, log, focus=focus)
             # 候选入库 + 打条目标签（库越用越厚：下次「视觉识别」类条目本地库直接命中）
             item_tag = tag_map.get(name, name)
             with SessionLocal() as session:

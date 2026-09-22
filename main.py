@@ -138,6 +138,11 @@ COURSES_DIR = Path(__file__).parent / "courses"
 COURSES_DIR.mkdir(exist_ok=True)
 app.mount("/courses", StaticFiles(directory=COURSES_DIR, html=True), name="courses")
 
+# 脚手架产物（scaffolds/{id}/scaffold.zip）静态托管：zip 直链下载；workspace/ 是生成过程区
+SCAFFOLDS_DIR = Path(__file__).parent / "scaffolds"
+(SCAFFOLDS_DIR / "workspace").mkdir(parents=True, exist_ok=True)
+app.mount("/scaffolds", StaticFiles(directory=SCAFFOLDS_DIR), name="scaffolds")
+
 # 课程发布目录（LOCAL_PUBLISH_DIR）：/publish 落盘的静态副本由本服务直接托管在 /published，
 # 服务器上 nginx 接管该目录时把 LOCAL_PUBLISH_BASE_URL 指向 nginx 的对外地址即可。
 # .md 注册成 text/plain：按 text/markdown 响应时浏览器会下载而不是在标签页显示（实测）

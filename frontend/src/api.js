@@ -116,3 +116,6 @@ async function apiPut(path, body) {
 export const splitScaffold = (id) => apiPost(`/api/scaffold/requests/${id}/split`)
 export const confirmScaffoldItems = (id, items, techStack) =>
   apiPut(`/api/scaffold/requests/${id}/items`, { items, tech_stack: techStack })
+// 逐条选型提交（自研条目 full_name 传 null）→ scaffold_build 生成任务
+export const submitScaffoldSelection = (id, selections) =>
+  apiPost(`/api/scaffold/requests/${id}/select`, { selections })
