@@ -1,0 +1,38 @@
+INFO:     Started server process [23096]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8101 (Press CTRL+C to quit)
+INFO:     127.0.0.1:58542 - "GET /api/config HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "POST /api/agent/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "POST /api/tasks/b79236331e8d/answer HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/b79236331e8d HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "POST /api/tasks/b79236331e8d/answer HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:58542 - "POST /api/tasks/b79236331e8d/answer HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:58542 - "POST /api/tasks/e2e-no-such-task/answer HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58542 - "POST /api/agent/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "POST /api/tasks/06faf62522e7/answer HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "GET /api/tasks/06faf62522e7 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58542 - "POST /api/tasks/06faf62522e7/answer HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:58542 - "POST /api/tasks/06faf62522e7/answer HTTP/1.1" 400 Bad Request
+INFO:     127.0.0.1:58542 - "POST /api/tasks/e2e-no-such-task/answer HTTP/1.1" 404 Not Found

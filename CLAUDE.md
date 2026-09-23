@@ -27,6 +27,7 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到服务器本地磁盘（`LOCAL_PUBLISH_DIR`，默认 `./published`，平台静态托管在 `/published`），返回 `entry_url` 等清单
   （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件；nginx 接管时改 `LOCAL_PUBLISH_BASE_URL`）
 - `GET /api/tasks?limit=N` — 后台任务状态；`GET /api/config` — 配置状态
+- `POST /api/tasks/{id}/answer` `{"id":"<问题id>","answers":[{"question":"…","answer":"…"}]}` 或 `{"id":"…","cancel":true}` — 投递 waiting 任务的应答/取消（waiting 态有效；404 任务不存在、409×6 非 waiting/无桥/无等待问题/id 不匹配/问题已轮替/已应答已过期、400 形状不对；投递只留痕 `✅ 应答：`/`⛔`，状态翻转由工具侧清场）
 - `POST /api/scaffold/requests {"text":"一句话需求"}` — 脚手架匹配任务（status=matching→matched，产出 `need_brief` 与 `framework_candidates` 5-8 个，
   双轨适配度 fit=规则0-40+LLM0-60）；`GET /api/scaffold/requests` 分页列表 / `GET /{id}` 详情；`POST /{id}/match` 改话重跑
 - `POST /api/scaffold/requests/{id}/adopt {"full_name"}` — 采用分支（同步评估报告，终态 done_adopt）

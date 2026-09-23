@@ -1,0 +1,86 @@
+== AskUser 全链 E2E  2026-09-23 16:56:40 ==
+归档目录：_bmad-output\implementation-artifacts\e2e-askuser\run-20260923-165640
+守卫通过：LLM 已配置（llm_configured=true）
+守卫通过：celestial.db 无 running/waiting 行（历史任务共 96 条）
+守卫通过：端口 8101 空闲
+起测试实例：uvicorn main:app --port 8101
+实例就绪（7s）：/api/config 200，llm=True
+$ curl -s -X POST 'http://127.0.0.1:8101/api/agent/run' -H 'Content-Type: application/json' -d '{"prompt": "【AskUser-E2E】请先调用 AskUserQuestion 问我一个问题：'你更喜欢猫还是狗？'，选项：猫（推荐）/狗。不要自问自答，必须先调用工具等我的应答。拿到我的回答后，用一句话总结并明确写出我选择了什么。"}'
+  -> 200 {"task_id":"89309b2688ae"}
+[应答] task_id=89309b2688ae，轮询（1s 一次，上限 300s，模式 answer）
+  [应答]    0.0s  status: - -> running
+  [应答]    6.0s  status: running -> waiting
+✓ [应答] pending_question 形状合法（id/questions/options/asked_at）
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/89309b2688ae/answer' -H 'Content-Type: application/json' -d '{"id": "8f02e91728a0431b82b4b9b5ca2739f2", "answers": [{"question": "你更喜欢猫还是狗？", "answer": "猫 (Recommended)"}]}'
+  -> 200 {"ok":true}
+  [应答]    7.0s  status: waiting -> running
+  [应答]   11.1s  status: running -> success
+已归档 _bmad-output\implementation-artifacts\e2e-askuser\run-20260923-165640\task-answer.json
+✓ 应答链：任务终态 success
+✓ 应答链：payload.result.result 含预定义答案「猫」
+✓ 应答链：应答投递成功（2xx）
+✓ 应答链：时间线含「❓ 等待用户应答」
+✓ 应答链：时间线含「✅ 应答：」
+✓ 应答链：时间线含「完成」
+✓ 应答链：时间线顺序 ❓→✅→完成
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/89309b2688ae/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "answers": [{"question": "负路径", "answer": "x"}]}'
+  -> 409 {"detail":"任务不在等待应答状态"}
+✓ [应答] 终态任务再应答 → 409
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/89309b2688ae/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "answers": [{"question": "负路径", "answer": "x"}], "cancel": true}'
+  -> 400 {"detail":"answers 与 cancel 必须二选一"}
+✓ [应答] answers 与 cancel 同传 → 400
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/e2e-no-such-task/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "cancel": true}'
+  -> 404 {"detail":"任务 e2e-no-such-task 不存在"}
+✓ [应答] 不存在的任务 → 404
+$ curl -s -X POST 'http://127.0.0.1:8101/api/agent/run' -H 'Content-Type: application/json' -d '{"prompt": "【AskUser-E2E】请先调用 AskUserQuestion 问我一个问题：'你更喜欢猫还是狗？'，选项：猫（推荐）/狗。不要自问自答，必须先调用工具等我的应答。拿到我的回答后，用一句话总结并明确写出我选择了什么。"}'
+  -> 200 {"task_id":"7b3a059652ef"}
+[取消] task_id=7b3a059652ef，轮询（1s 一次，上限 300s，模式 cancel）
+  [取消]    0.0s  status: - -> running
+  [取消]    5.0s  status: running -> waiting
+✓ [取消] pending_question 形状合法（id/questions/options/asked_at）
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/7b3a059652ef/answer' -H 'Content-Type: application/json' -d '{"id": "7e0a85c0008a4a31b1e724ce06899b9e", "cancel": true}'
+  -> 200 {"ok":true}
+  [取消]    6.0s  status: waiting -> running
+  [取消]   10.0s  status: running -> success
+已归档 _bmad-output\implementation-artifacts\e2e-askuser\run-20260923-165640\task-cancel.json
+✓ 取消链：任务正常收尾（success/failed 均可）
+✓ 取消链：取消投递成功（2xx）
+✓ 取消链：时间线含「❓」
+✓ 取消链：时间线含「⛔」
+✓ 取消链：⛔ 之后不再出现 ❓（取消终结问询循环）
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/7b3a059652ef/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "answers": [{"question": "负路径", "answer": "x"}]}'
+  -> 409 {"detail":"任务不在等待应答状态"}
+✓ [取消] 终态任务再应答 → 409
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/7b3a059652ef/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "answers": [{"question": "负路径", "answer": "x"}], "cancel": true}'
+  -> 400 {"detail":"answers 与 cancel 必须二选一"}
+✓ [取消] answers 与 cancel 同传 → 400
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/e2e-no-such-task/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "cancel": true}'
+  -> 404 {"detail":"任务 e2e-no-such-task 不存在"}
+✓ [取消] 不存在的任务 → 404
+停测试实例（terminate + wait）
+起测试实例：uvicorn main:app --port 8101（附加 env：{'SKILL_RUN_TIMEOUT': '45'}）
+实例就绪（8s）：/api/config 200，llm=True
+$ curl -s -X POST 'http://127.0.0.1:8101/api/agent/run' -H 'Content-Type: application/json' -d '{"prompt": "【AskUser-E2E】请先调用 AskUserQuestion 问我一个问题：'你更喜欢猫还是狗？'，选项：猫（推荐）/狗。不要自问自答，必须先调用工具等我的应答。拿到我的回答后，用一句话总结并明确写出我选择了什么。"}'
+  -> 200 {"task_id":"d6966940f2ae"}
+[超时] task_id=d6966940f2ae，轮询（1s 一次，上限 300s，模式 timeout）
+  [超时]    0.0s  status: - -> running
+  [超时]   18.1s  status: running -> waiting
+✓ [超时] pending_question 形状合法（id/questions/options/asked_at）
+  [超时]   45.1s  status: waiting -> failed
+已归档 _bmad-output\implementation-artifacts\e2e-askuser\run-20260923-165640\task-timeout.json
+✓ 超时链：任务达终态（success/failed 均可）
+✓ 超时链：时间线含「❓」（确实发起过问询）
+✗ 超时链：时间线含「⏳」（问询过期留痕）
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/d6966940f2ae/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "answers": [{"question": "负路径", "answer": "x"}]}'
+  -> 409 {"detail":"任务不在等待应答状态"}
+✓ [超时] 终态任务再应答 → 409
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/d6966940f2ae/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "answers": [{"question": "负路径", "answer": "x"}], "cancel": true}'
+  -> 400 {"detail":"answers 与 cancel 必须二选一"}
+✓ [超时] answers 与 cancel 同传 → 400
+$ curl -s -X POST 'http://127.0.0.1:8101/api/tasks/e2e-no-such-task/answer' -H 'Content-Type: application/json' -d '{"id": "neg-probe", "cancel": true}'
+  -> 404 {"detail":"任务 e2e-no-such-task 不存在"}
+✓ [超时] 不存在的任务 → 404
+停测试实例（terminate + wait）
+
+== 结果：26 通过 / 1 失败 ==
+  ✗ 超时链：时间线含「⏳」（问询过期留痕）
