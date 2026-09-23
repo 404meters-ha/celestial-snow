@@ -40,6 +40,32 @@ def _append_log(task_id: str, msg: str, **extra) -> None:
         s.commit()
 
 
+def _clear_pending_question(task_id: str) -> None:
+    """终态清场兜底：status 无关地 pop payload.pending_question，并幂等注销问题桥。
+
+    工具侧 _restore_running 是第一道清场（AD-1 单写者），但引擎吞工具异常、或任务层
+    在问询挂起期间直接写终态时，残留的 pending_question 会让 UI 挂僵尸问题——这里补第二道网。
+    askuser 顶置 import 会成环（它已 `from ..tasks import _now`），必须惰性导入；
+    惰性 import 也进 try：兜底网在终态写入之后再抛异常会顶掉 _runner 的收尾语义。
+    """
+    try:
+        from .services import askuser  # noqa: PLC0415 惰性导入防环
+
+        try:
+            with SessionLocal() as s:
+                row = s.get(TaskRun, task_id)
+                if row is not None:
+                    payload = dict(row.payload or {})
+                    if payload.pop("pending_question", None) is not None:
+                        row.payload = payload
+                        s.commit()
+        except Exception:  # noqa: BLE001 清键失败不影响注销
+            pass
+        askuser.abort_bridge(task_id)  # 无桥静默返回（幂等）
+    except Exception:  # noqa: BLE001 兜底网绝不外抛（含 import 失败）
+        pass
+
+
 def _task_view(row: TaskRun, with_logs: bool = False) -> dict:
     view = {
         "id": row.id, "type": row.type, "status": row.status, "progress": row.progress,
@@ -77,13 +103,16 @@ class TaskManager:
             try:
                 await coro_factory(task_id, progress, log)
                 _append_log(task_id, "完成", status="success", finished_at=_now())
+                _clear_pending_question(task_id)
             except asyncio.CancelledError:
                 _append_log(task_id, "失败：已取消", status="failed", error="已取消",
                             finished_at=_now())
+                _clear_pending_question(task_id)
                 raise
             except Exception as e:  # noqa: BLE001 任务层兜底，错误落库展示
                 err = f"{type(e).__name__}: {e}"
                 _append_log(task_id, f"失败：{err}", status="failed", error=err, finished_at=_now())
+                _clear_pending_question(task_id)
 
         self._tasks[task_id] = asyncio.create_task(_runner(), name=task_id)
         return task_id

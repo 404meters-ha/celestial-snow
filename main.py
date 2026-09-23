@@ -67,20 +67,32 @@ async def lifespan(app: FastAPI):
 
 
 def _fail_orphan_tasks() -> None:
-    """服务重启会把进程内 asyncio 任务带走；库里还挂着 running 的都是孤儿，标记失败。"""
-    from datetime import datetime, timezone
+    """服务重启会把进程内 asyncio 任务带走；库里还挂着 running/waiting 的都是孤儿，标记失败。
 
-    from sqlalchemy import update
-
+    waiting 行可能残留 pending_question（重启僵尸问题，桥是进程内的、新进程里已不存在），
+    一并清掉，否则 UI 会挂着永远等不到应答的问题。启动时一次性、量小：select 后逐行
+    读改写——要读 payload 才能清 JSON 键，bulk update 做不到。单行 payload 损坏只记
+    日志跳过（print：启动期无 logger），绝不拖垮 lifespan 启动。
+    """
     from app.db import SessionLocal
     from app.models import TaskRun
+    from app.tasks import _now
 
     with SessionLocal() as session:
-        session.execute(
-            update(TaskRun)
-            .where(TaskRun.status == "running")
-            .values(status="failed", error="服务重启，任务中断", finished_at=datetime.now(timezone.utc))
-        )
+        rows = session.query(TaskRun).filter(TaskRun.status.in_(("running", "waiting"))).all()
+        for row in rows:
+            try:
+                payload = dict(row.payload or {})
+                cleaned = payload.pop("pending_question", None) is not None
+            except Exception:  # noqa: BLE001 单行损坏跳过，清扫继续
+                print(f"[startup] 孤儿任务清扫跳过损坏行 {row.id}", flush=True)
+                session.expunge(row)  # 丢弃该行未提交变更，跳过继续
+                continue
+            row.status = "failed"
+            row.error = "服务重启，任务中断"
+            row.finished_at = _now()
+            if cleaned:
+                row.payload = payload  # pq 不存在不重赋值（不标脏）
         session.commit()
 
 

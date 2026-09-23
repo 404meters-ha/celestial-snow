@@ -2,6 +2,7 @@
 import json
 import re
 import shutil
+from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select
 
@@ -22,7 +23,7 @@ from .models import (
     TaskRun,
     utcnow,
 )
-from .services import course_publish, scoring
+from .services import askuser, course_publish, scoring
 from .services.store import StoreError
 from .services.github_client import GitHubClient
 from .services.industry import (
@@ -42,7 +43,7 @@ from .services.pipeline import (
     contribution_pipeline,
     refresh_pipeline,
 )
-from .tasks import manager
+from .tasks import _append_log, manager
 
 router = APIRouter(prefix="/api")
 
@@ -303,6 +304,89 @@ def get_task(task_id: str):
     if task is None:
         raise HTTPException(404, f"任务 {task_id} 不存在")
     return {"task": task}
+
+
+class AnswerRequest(BaseModel):
+    """waiting 任务的应答请求：{id, answers} 或 {id, cancel: true}。
+
+    三字段全 typing.Any、类型与形状校验都在端点内手工做——严格模型会把 id 传 int、
+    answers 传字符串等变成 FastAPI 的 422 而非契约的 400。
+    """
+
+    id: Any = None
+    answers: Any = None  # [{"question": str, "answer": str}]，元素形状端点内校验
+    cancel: Any = None
+
+
+@router.post("/tasks/{task_id}/answer")
+def answer_task(task_id: str, req: AnswerRequest):
+    """投递用户对 waiting 任务的应答（问题桥的 HTTP 侧入口）。
+
+    只投递 + 留痕，**不写 status、不清 pending_question**——waiting→running 的翻转与
+    pq 清除是工具侧 execute 清场的单写者职责（AD-1），端点抢写会在竞态窗口里复活终态。
+    sync def：deliver/_append_log 是同步 SQLite I/O，走 FastAPI 线程池，不占事件循环。
+    检查次序：400 形状/类型 → 404 → 409 非 waiting → 409 无桥 → 409 无等待问题 →
+    409 id 不匹配 → TOCTOU 复核 → deliver False（已应答/已关闭/已过期）则 409——
+    超时后迟到的答案不得误报 200。
+    """
+    if not isinstance(req.id, str) or not req.id.strip():
+        raise HTTPException(400, "缺少问题 id")
+    if req.cancel is not None and not isinstance(req.cancel, bool):
+        raise HTTPException(400, "cancel 须为布尔值")
+    if req.answers is not None and not isinstance(req.answers, list):
+        raise HTTPException(400, "answers 须为数组")
+    is_cancel = req.cancel is True  # cancel:false 视同缺省，绝不当取消执行
+    has_answers = req.answers is not None
+    if not is_cancel and not has_answers:  # 两无（false/缺省都不算已选 cancel）
+        raise HTTPException(400, "answers 与 cancel 必须二选一")
+    if req.cancel is not None and has_answers:  # 两有（false 与 answers 同传也是违例）
+        raise HTTPException(400, "answers 与 cancel 必须二选一")
+    if has_answers:
+        if not req.answers:
+            raise HTTPException(400, "answers 不能为空")
+        if len(req.answers) > 4:
+            raise HTTPException(400, "answers 最多 4 条（与问题数同口径）")
+        for e in req.answers:
+            if (not isinstance(e, dict)
+                    or not isinstance(e.get("question"), str) or not e["question"].strip()
+                    or not isinstance(e.get("answer"), str) or not e["answer"].strip()):
+                raise HTTPException(400, "answers 元素须为 {question, answer} 且均为非空字符串")
+
+    with SessionLocal() as s:
+        row = s.get(TaskRun, task_id)
+    if row is None:
+        raise HTTPException(404, f"任务 {task_id} 不存在")
+    if row.status != "waiting":
+        raise HTTPException(409, "任务不在等待应答状态")
+    bridge = askuser.get_bridge(task_id)
+    if bridge is None:  # 重启僵尸（桥是进程内的）或竞态窗口：问题已自然结束
+        raise HTTPException(409, "应答桥不存在：任务可能已重启或问题已结束")
+    pending = (row.payload or {}).get("pending_question")
+    if not isinstance(pending, dict):
+        raise HTTPException(409, "当前没有等待中的问题")
+    if pending.get("id") != req.id:
+        raise HTTPException(409, "应答 id 与当前等待的问题不匹配")
+    # TOCTOU 复核：读行与取桥之间问题可能已轮替（超时→重问换新桥新 pq.id），旧 id 会把
+    # 答案 latch 进下一问的桥——新鲜读一次，状态与 id 都对得上才投递
+    with SessionLocal() as s:
+        fresh = s.get(TaskRun, task_id)
+    fresh_pending = (fresh.payload or {}).get("pending_question") if fresh is not None else None
+    if (fresh is None or fresh.status != "waiting"
+            or not isinstance(fresh_pending, dict) or fresh_pending.get("id") != req.id):
+        raise HTTPException(409, "问题已轮替或已结束，请刷新后重试")
+    if not bridge.deliver("cancelled" if is_cancel else "answered", req.answers):
+        raise HTTPException(409, "该问题已应答、已关闭或已过期，不能再投递")
+
+    # 投递是事实源，留痕尽力而为：失败不能 500（客户端重试会撞上面的 409）
+    try:
+        if is_cancel:
+            _append_log(task_id, "⛔ 用户取消了应答")
+        else:  # 摘要口径与 ❓ preview 一致：逐条 join 后截 120 字符
+            summary = "；".join(f"{e['question']} => {e['answer']}" for e in req.answers)[:120]
+            _append_log(task_id, f"✅ 应答：{summary}")
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": True}
 
 
 # ---------- 报告 ----------
