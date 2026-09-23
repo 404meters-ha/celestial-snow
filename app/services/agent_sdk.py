@@ -17,6 +17,8 @@ from core.permissions import PermissionChecker
 from core.tool import Tool, ToolResult
 from features.cost_tracker import CostTracker
 
+from . import askuser
+
 MAX_TURNS = 60  # API 轮次上限，防失控（课程生成一类任务工具调用多，40 不够用）
 
 # 文件白名单：agent 只能碰产物子树。读=技能资产模板+课程+脚手架；写=课程产物+脚手架工作区。
@@ -318,18 +320,53 @@ class PlatformApiTool(Tool):
         return ToolResult(head + text, is_error=resp.status_code >= 400)
 
 
-def _system_prompt() -> str:
-    """云端分析 agent 的身份与操作手册（替代本地 CLAUDE.md 概念）。"""
+def _build_tools(task_id: str | None, log_cb, deadline_at: float,
+                 interactive: bool = False) -> list[Tool]:
+    """run() 与测试共用的工具组装：基础五件 + interactive 追加 AskUserQuestion。
+
+    interactive=True 且 task_id 非空才挂问询工具（无任务行可写时不挂、不报错）；
+    deadline_at 由 run() 按 timeout 在起点算好注入——问询等待与工具执行共享同一额度。
+    """
+    tools: list[Tool] = [WebFetchTool(), PlatformApiTool(), ReadFileTool(), ListDirTool(), WriteFileTool()]
+    if interactive and task_id:
+        tools.append(askuser.AskUserQuestionTool(task_id, log_cb, deadline_at))
+    return tools
+
+
+def _system_prompt(interactive: bool = False) -> str:
+    """云端分析 agent 的身份与操作手册（替代本地 CLAUDE.md 概念）。
+
+    interactive=True（技能 invoke / AI 命令栏等有人值守运行）时「环境与能力」如实列出
+    AskUserQuestion，并追加「向用户提问」段（何时该问/用法）；False 与历史版本逐字一致
+    （scaffold 走覆盖式 system_prompt，本就不受这里影响）。
+    """
     from ..config import get_settings
 
     s = get_settings()
+    tools_line = (
+        "- 你运行在云服务进程内，没有 Shell。工具六件：WebFetch（抓远程网页/GitHub）、PlatformAPI（调本平台 API）、\n"
+        "  ReadFile（读 .claude/skills/、courses/、scaffolds/ 下文件）、ListDir（列这些目录核对产物）、WriteFile（只能写 courses/ 或 scaffolds/ 下）、\n"
+        "  AskUserQuestion（向用户提问并等待应答，用法见下方「向用户提问」段）。"
+        if interactive else
+        "- 你运行在云服务进程内，没有 Shell。工具四个：WebFetch（抓远程网页/GitHub）、PlatformAPI（调本平台 API）、\n"
+        "  ReadFile/ListDir（读 .claude/skills/ 技能资产与 courses/、scaffolds/ 产物文件）、WriteFile（只能写 courses/ 或 scaffolds/ 下）。"
+    )
+    ask_section = (
+        "\n## 向用户提问\n"
+        "- 何时该问：只有依赖用户偏好或授权才能定的分叉（如实现方案取舍、有歧义指令的澄清、是否继续推进），"
+        "才用 AskUserQuestion 提问——一次 1-4 个问题、每问 2-4 个选项（label + description），"
+        "推荐选项放第一位并在 label 末尾加 \"(Recommended)\"；用户永远可以自由输入（Other），multiSelect: true 允许多选。\n"
+        "- 何时不该问：凡是能靠工具查资料回答的（WebFetch/PlatformAPI/ReadFile），自己查、不许问用户；"
+        "也不要为同一件事反复提问。\n"
+        "- 提问后任务转入 waiting，用户应答、取消或超时后自动恢复运行，答案作为继续执行的依据。\n"
+        if interactive else ""
+    )
     return f"""你是 celestial-snow 平台内置的开源项目分析 agent，运行在云服务进程内。
 
 ## 环境与能力
-- 你运行在云服务进程内，没有 Shell。工具四个：WebFetch（抓远程网页/GitHub）、PlatformAPI（调本平台 API）、
-  ReadFile/ListDir（读 .claude/skills/ 技能资产与 courses/、scaffolds/ 产物文件）、WriteFile（只能写 courses/ 或 scaffolds/ 下）。
+{tools_line}
 - 分析对象是 GitHub 上的开源项目代码与 issue：一切信息通过网络获取，禁止凭空编造。
-
+{ask_section}
 ## 平台工具手册（生成课程一类任务用）
 - 平台 API 一律走 PlatformAPI，不要用 WebFetch 打本机地址：取学习上下文 GET /api/learning-context/{{issue_id}}；
   注册课程 POST /api/courses（body 含 issue_id/title/lessons）；发布课程 POST /api/courses/{{id}}/publish（重生成后加 body {{"prune": true}}）。
@@ -368,7 +405,7 @@ def warmup() -> None:
     """
     cost = CostTracker()
     Engine(
-        tools=[WebFetchTool(), PlatformApiTool(), ReadFileTool(), ListDirTool(), WriteFileTool()],
+        tools=_build_tools(None, None, 0.0),
         system_prompt="warmup",
         permission_checker=PermissionChecker(auto_approve=True),
         provider="openai",
@@ -381,12 +418,17 @@ def warmup() -> None:
 
 async def run(prompt: str, progress, log=None, timeout: int = 3600,
               max_turns: int = MAX_TURNS, system_prompt: str | None = None,
-              max_tokens: int | None = None) -> dict:
+              max_tokens: int | None = None, task_id: str | None = None,
+              interactive: bool = False) -> dict:
     """执行一次 agent。prompt 为自由指令或已解析好的技能正文。
 
     log 是追加式时间线回调（长任务用）；不传时退回 progress 的单行覆盖语义。
     system_prompt 不传时用默认的分析 agent 身份；任务型调用方（如脚手架生成）传自己的。
     max_tokens 不传时走 vendor 默认（openai 回落 8192）；生成类任务单轮输出大，传 16384+。
+    interactive=True 且 task_id 非空时挂 AskUserQuestionTool 并启用提示词「向用户提问」段
+    （技能 invoke / AI 命令栏等有人值守运行）；scaffold 等无人值守调用保持默认 False 不受影响。
+    传自定义 system_prompt 时提问段不会被追加（整段被覆盖），但工具仍按 interactive/task_id 条件挂载；
+    interactive=True 而 task_id 为空时，工具与提示词提问段都不启用（无任务行可写）。
     返回 {result, cost_usd, duration_ms, num_turns}；由调用方（任务层）落库。
     """
     from ..config import get_settings
@@ -396,10 +438,15 @@ async def run(prompt: str, progress, log=None, timeout: int = 3600,
         raise RuntimeError("LLM 未配置（.env 的 LLM_BASE_URL / LLM_API_KEY），无法运行 agent")
 
     emit = log or progress
+    t0 = time.monotonic()
+    # AskUserQuestion 的等待额度与 run(timeout) 同源、run 起点算：问询等待与工具执行共享
+    # 同一额度——任务级超时一到桥先过期，不留「run 已超时、问题还挂在界面上」的窗口
+    deadline_at = t0 + timeout
     cost = CostTracker()
     engine = Engine(
-        tools=[WebFetchTool(), PlatformApiTool(), ReadFileTool(), ListDirTool(), WriteFileTool()],
-        system_prompt=system_prompt or _system_prompt(),
+        tools=_build_tools(task_id, emit, deadline_at, interactive),
+        # 提示词旗标与工具挂载同条件：interactive 无 task_id 时工具不挂，提示词也不宣告（防调不存在的工具）
+        system_prompt=system_prompt or _system_prompt(bool(interactive and task_id)),
         permission_checker=PermissionChecker(auto_approve=True),
         provider="openai",
         api_key=s.llm_api_key,
@@ -453,6 +500,8 @@ async def run(prompt: str, progress, log=None, timeout: int = 3600,
                     if state["turns"] >= max_turns:
                         emit(f"已达轮次上限 {max_turns}，主动中止")
                         engine.abort()
+                        if task_id:  # 防御性：事件流里工具不可能正阻塞，但两处中止语义保持一致
+                            askuser.abort_bridge(task_id)
                 elif kind == "error":
                     emit(f"⚠️ {_one_line(event[1])}")
                 # "tool_executing" / "waiting" 是调度细节，对用户没有信息量，忽略
@@ -461,13 +510,22 @@ async def run(prompt: str, progress, log=None, timeout: int = 3600,
         return engine.last_assistant_text() or "".join(chunks).strip()
 
     state = {"turns": 0}
-    t0 = time.monotonic()
     try:
         result = await asyncio.wait_for(asyncio.to_thread(_drive), timeout=timeout)
     except asyncio.TimeoutError:
         emit(f"超时（>{timeout}s），主动中止")
         engine.abort()  # worker 线程下一个事件点自行退出
+        if task_id:
+            # abort 只关 HTTP 流叫不醒 Event.wait——必须叫醒阻塞中的问询（无桥时幂等静默）
+            askuser.abort_bridge(task_id)
         raise RuntimeError(f"agent 执行超时（>{timeout}s），已中止") from None
+    except asyncio.CancelledError:
+        # 任务层取消/服务关停：镜像超时语义——不叫醒的话阻塞中的问询会泊到 deadline
+        # （最长 skill_run_timeout，3600s），worker 线程同理
+        engine.abort()
+        if task_id:
+            askuser.abort_bridge(task_id)
+        raise
 
     return {
         "result": result,

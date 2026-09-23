@@ -106,6 +106,8 @@ async def run_prompt(prompt: str, task_id: str, progress, log=None, timeout: int
     """无头执行一段 prompt：/开头解析为技能（正文注入），自由文本原样执行。
 
     log 是追加式时间线回调（前端进度面板用）；不传时退回 progress 的单行语义。
+    task_id 与 interactive=True 透传给 agent_sdk.run——技能 invoke 与 AI 命令栏两个
+    入口都经这里，由此统一获得「执行中可问用户」能力（挂 AskUserQuestion + 提问提示词段）。
     返回 {result, cost_usd, duration_ms, num_turns}；由调用方（任务层）落库。
     """
     from . import agent_sdk
@@ -118,7 +120,8 @@ async def run_prompt(prompt: str, task_id: str, progress, log=None, timeout: int
             emit(f"解析技能 /{m.group(1)}…")
             prompt = resolve_skill(m.group(1), m.group(2))
     emit("启动内置 Agent SDK…")
-    return await agent_sdk.run(prompt, progress, log=log, timeout=timeout)
+    return await agent_sdk.run(prompt, progress, log=log, timeout=timeout,
+                               task_id=task_id, interactive=True)
 
 
 async def run_skill(name: str, args: str, task_id: str, progress, log=None,
