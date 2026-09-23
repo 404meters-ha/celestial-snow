@@ -175,7 +175,7 @@ class TaskRun(Base):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)  # uuid
     type: Mapped[str] = mapped_column(String(32))  # refresh | contribution | skill | agent | industry | tagging | analyze | scaffold_*
-    status: Mapped[str] = mapped_column(String(16), default="running")  # running|success|failed
+    status: Mapped[str] = mapped_column(String(16), default="running")  # running|waiting|success|failed
     progress: Mapped[str] = mapped_column(Text, default="")
     logs: Mapped[list] = mapped_column(JSON, default=list)
     error: Mapped[str] = mapped_column(Text, default="")
