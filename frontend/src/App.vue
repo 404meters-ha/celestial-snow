@@ -26,35 +26,6 @@
         <el-button type="primary" :loading="agentRunning" @click="runAgentCmd">运行</el-button>
       </div>
 
-      <!-- 后台任务进度：运行时是时间线面板（真实长任务 74~338s，单行覆盖看不出还在动），
-           结束后留在原位显示终态摘要，点「关闭」收起 -->
-      <div v-if="panelTask" class="task-panel">
-        <div class="task-head" @click="togglePanel">
-          <el-tag :type="statusTag(panelTask.status)" size="small">{{ statusLabel(panelTask.status) }}</el-tag>
-          <span class="task-what" :title="panelLabel(panelTask)">{{ panelLabel(panelTask) }}</span>
-          <span class="task-msg" :class="{ 'task-err': panelTask.status === 'failed' }">
-            {{ panelTask.status === 'failed'
-              ? (panelTask.error || panelTask.progress)
-              : (panelTask.progress || '处理中…') }}
-          </span>
-          <span class="task-elapsed">{{ panelTask.status === 'running' ? '已运行' : '耗时' }} {{ elapsedText }}</span>
-          <span v-if="panelLogs.length" class="task-toggle">{{ panelOpen ? '▲' : '▼' }}</span>
-        </div>
-        <div v-show="panelOpen" ref="logsBox" class="task-logs">
-          <div v-for="(l, i) in logLines" :key="i" class="log-line">
-            <span class="log-time">{{ l.t }}</span>{{ l.msg }}
-          </div>
-        </div>
-        <div v-if="panelTask.status !== 'running'" class="task-foot">
-          <span v-if="panelResult && panelResult.cost_usd != null" class="muted">
-            成本 ${{ panelResult.cost_usd.toFixed(4) }} · {{ panelResult.num_turns }} 轮
-          </span>
-          <el-button v-if="panelResult?.result" link type="primary" size="small"
-            @click="showResult(panelTask)">查看结果</el-button>
-          <el-button link size="small" @click="closePanel">关闭</el-button>
-        </div>
-      </div>
-
       <el-tabs v-model="activeTab" class="main-tabs">
         <!-- ================= 项目榜 ================= -->
         <el-tab-pane name="repos">
@@ -535,10 +506,7 @@
             </el-table-column>
             <el-table-column label="状态" width="96">
               <template #default="{ row }">
-                <el-tag size="small"
-                  :type="row.status === 'success' ? 'success' : row.status === 'running' ? 'primary' : 'danger'">
-                  {{ row.status === 'success' ? '成功' : row.status === 'running' ? '运行中' : '失败' }}
-                </el-tag>
+                <el-tag size="small" :type="statusTag(row.status)">{{ statusLabel(row.status) }}</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="进度 / 错误" min-width="240">
@@ -947,18 +915,99 @@
         <pre class="result-pre">{{ resultTask.payload?.result?.result }}</pre>
       </template>
     </el-dialog>
+    <!-- 右下角任务中心：所有运行中/等待中任务一卡一条（长任务如脚手架生成 74~338s 需要常驻可见），
+         终态卡停留待确认，收起成胶囊；waiting 卡内嵌应答表单（交互式技能中途抛问题） -->
+    <div v-if="taskCards.length" class="task-center">
+      <template v-if="centerOpen">
+        <div class="tc-head">
+          <span class="tc-title">任务中心</span>
+          <span class="tc-count">{{ activeCards.length ? `${activeCards.length} 个进行中` : '近期任务' }}</span>
+          <span v-if="taskCards.some((c) => c.status !== 'running' && c.status !== 'waiting')"
+            class="tc-clear" title="清除已结束的任务" @click="clearDoneCards">清除已结束</span>
+          <span class="tc-min" title="收起" @click="centerOpen = false">—</span>
+        </div>
+        <div class="tc-list">
+          <div v-for="c in taskCards" :key="c.id" class="tc-card" :class="`tc-${c.status}`">
+            <div v-if="c.status === 'running' || c.status === 'waiting'" class="tc-bar"></div>
+            <div class="tc-row" @click="toggleCardLogs(c)">
+              <span class="tc-icon">{{ statusIcon(c.status) }}</span>
+              <span class="tc-what" :title="panelLabel(c)">{{ panelLabel(c) }}</span>
+              <span class="tc-elapsed">
+                {{ c.status === 'running' || c.status === 'waiting' ? '已运行' : '耗时' }} {{ elapsedOf(c) }}
+              </span>
+              <span v-if="c.logs.length" class="tc-toggle">{{ c.expanded ? '▲' : '▼' }}</span>
+            </div>
+            <div class="tc-msg" :class="{ 'tc-err': c.status === 'failed' }">
+              {{ c.status === 'failed'
+                ? (c.error || c.progress)
+                : (c.progress || (c.status === 'waiting' ? '等待你的回答…' : '处理中…')) }}
+            </div>
+
+            <!-- waiting：问题应答表单（options 单选/多选 + 「其他」自由输入——工具语义承诺用户永远可自由作答；
+                 无 options 直接自由作答；问题可轮替，id 变了表单自动刷新） -->
+            <div v-if="c.status === 'waiting' && c.payload?.pending_question && !c.answered" class="tc-ask">
+              <div v-for="(q, qi) in c.payload.pending_question.questions" :key="qi" class="tc-q">
+                <div class="tc-q-text">{{ qi + 1 }}. {{ q.question }}</div>
+                <el-radio-group v-if="q.options?.length && !q.multiSelect" v-model="c.answers[qi]" class="tc-choices">
+                  <el-radio v-for="o in q.options" :key="o.label" :value="o.label" class="tc-option">
+                    {{ o.label }}<span v-if="o.description" class="tc-q-desc"> — {{ o.description }}</span>
+                  </el-radio>
+                  <el-radio value="__other__" class="tc-option">✍ 其他</el-radio>
+                </el-radio-group>
+                <el-checkbox-group v-else-if="q.options?.length" v-model="c.answers[qi]" class="tc-choices">
+                  <el-checkbox v-for="o in q.options" :key="o.label" :value="o.label" class="tc-option">
+                    {{ o.label }}<span v-if="o.description" class="tc-q-desc"> — {{ o.description }}</span>
+                  </el-checkbox>
+                  <el-checkbox value="__other__" class="tc-option">✍ 其他</el-checkbox>
+                </el-checkbox-group>
+                <el-input
+                  v-if="q.options?.length && (c.answers[qi] === '__other__'
+                    || (Array.isArray(c.answers[qi]) && c.answers[qi].includes('__other__')))"
+                  v-model="c.others[qi]" class="tc-other-input" placeholder="输入自定义回答…" />
+                <el-input v-else-if="!q.options?.length" v-model="c.answers[qi]" placeholder="输入你的回答…" />
+              </div>
+              <div class="tc-ask-actions">
+                <el-button size="small" :loading="c.submitting" @click="cancelAnswer(c)">取消应答</el-button>
+                <el-button size="small" type="primary" :loading="c.submitting" @click="submitAnswer(c)">提交回答</el-button>
+              </div>
+            </div>
+            <div v-else-if="c.status === 'waiting' && c.answered" class="tc-answered">✅ 已提交，任务继续执行…</div>
+
+            <div v-show="c.expanded && c.logs.length" :data-task="c.id" class="task-logs">
+              <div v-for="(l, i) in logLinesOf(c)" :key="i" class="log-line">
+                <span class="log-time">{{ l.t }}</span>{{ l.msg }}
+              </div>
+            </div>
+            <div v-if="c.status !== 'running' && c.status !== 'waiting'" class="tc-foot">
+              <span v-if="c.payload?.result?.cost_usd != null" class="muted">
+                成本 ${{ c.payload.result.cost_usd.toFixed(4) }} · {{ c.payload.result.num_turns }} 轮
+              </span>
+              <span class="tc-foot-gap"></span>
+              <el-button v-if="c.payload?.result?.result" link type="primary" size="small"
+                @click="showResult(c)">查看结果</el-button>
+              <el-button link size="small" @click="closeCard(c)">关闭</el-button>
+            </div>
+          </div>
+        </div>
+      </template>
+      <div v-else class="tc-pill" @click="centerOpen = true">
+        <span v-if="activeCards.length" class="tc-pill-spin"></span>
+        <span v-else class="tc-pill-dot"></span>
+        {{ activeCards.length ? `${activeCards.length} 个任务运行中` : '任务动态' }}
+      </div>
+    </div>
   </el-container>
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  BASE, adoptScaffold, confirmScaffoldItems, createScaffoldRequest, deleteIndustry, getConfig,
-  getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos, getReport,
-  getScaffold, getScaffolds, getSkills, getTags, getTask, getTasks, invokeSkill, postAnalyze,
-  postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh, postTranslate,
-  rematchScaffold, runAgent, splitScaffold, submitScaffoldSelection,
+  BASE, adoptScaffold, answerTask, confirmScaffoldItems, createScaffoldRequest, deleteIndustry,
+  getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos,
+  getReport, getScaffold, getScaffolds, getSkills, getTags, getTask, getTasks, invokeSkill,
+  postAnalyze, postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh,
+  postTranslate, rematchScaffold, runAgent, splitScaffold, submitScaffoldSelection,
 } from './api'
 
 const activeTab = ref('repos')
@@ -1013,10 +1062,12 @@ const report = ref(null)
 const refreshing = ref(false)
 const contributing = ref(false)
 // 进度面板当前展示的任务：自己提交的（定向轮询）或扫描到的运行中任务；结束后留在面板上显示摘要
-const panelTask = ref(null)
-const panelLogs = ref([])      // 面板任务的时间线（列表接口不带 logs，按需拉 /api/tasks/{id}）
-const panelOpen = ref(false)
-const logsBox = ref(null)      // 日志滚动容器（新增行自动滚底）
+// ---------- 任务中心（右下角浮动卡） ----------
+const taskCards = ref([])      // 在册卡：running/waiting + 刚终态未关闭的
+const centerOpen = ref(true)   // 展开卡堆栈；false 收起成右下角胶囊
+let centerTimer = null         // 统一轮询：有进行中任务 2s，空闲降 10s 心跳（外部入口提交的任务也能被发现）
+let centerBusy = false         // 单飞标志：上一轮没跑完不叠下一轮
+const onDoneMap = new Map()    // taskId -> 终态回调（各提交处的数据刷新钩子）
 const tick = ref(0)            // 每秒自增，驱动「耗时」重算（Date.now 本身不是响应式的）
 const issueSort = ref('match')
 const issueDifficulty = ref('')
@@ -1043,7 +1094,6 @@ const agentInput = ref(null)
 const skillTasks = ref([])
 const resultDialog = ref(false)
 const resultTask = ref(null)
-let pollTimer = null
 let tickTimer = null
 let debounceTimer = null
 
@@ -1071,8 +1121,7 @@ function periodLabel(periods) {
   return periods[0] === 'weekly' ? '周榜' : '月榜'
 }
 
-// ---------- 进度面板 ----------
-const panelResult = computed(() => panelTask.value?.payload?.result || null)
+// ---------- 任务耗时与日志格式化 ----------
 
 /** SQLite 的 DateTime 列存的是 UTC，但序列化出来不带时区（"2026-09-14T02:50:07.357854"），
  *  Date.parse 会当成本地时间、耗时平白多出 8 小时——补个 Z 才是真实时刻。
@@ -1090,31 +1139,45 @@ function fmtDuration(sec) {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
 }
 
-const elapsedText = computed(() => {
-  void tick.value // 建立依赖：每秒重算一次未结束任务的耗时
-  const t = panelTask.value
-  if (!t?.created_at) return ''
-  const end = t.finished_at ? parseUTC(t.finished_at) : Date.now()
-  return fmtDuration(Math.max(0, Math.round((end - parseUTC(t.created_at)) / 1000)))
-})
-
-const logLines = computed(() => (panelLogs.value || []).map((l) => {
-  const ms = parseUTC(l.t)
-  return { t: Number.isNaN(ms) ? '' : new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }), msg: l.msg }
-}))
-
-async function scrollLogsBottom() {
-  await nextTick()
-  const el = logsBox.value
-  if (el) el.scrollTop = el.scrollHeight
+/** 卡片耗时：方法内读 tick 建立依赖，每秒重算所有未结束卡的「已运行」 */
+function elapsedOf(c) {
+  void tick.value
+  if (!c.created_at) return ''
+  const end = c.finished_at ? parseUTC(c.finished_at) : Date.now()
+  return fmtDuration(Math.max(0, Math.round((end - parseUTC(c.created_at)) / 1000)))
 }
-watch([() => panelOpen.value, () => panelLogs.value.length], scrollLogsBottom)
+
+function logLinesOf(c) {
+  return (c.logs || []).map((l) => {
+    const ms = parseUTC(l.t)
+    return { t: Number.isNaN(ms) ? '' : new Date(ms).toLocaleTimeString('zh-CN', { hour12: false }), msg: l.msg }
+  })
+}
+
+/** 展开中/新日志到达的卡自动滚底（多卡并存，按 data-task 定位各自的日志容器；
+ *  用户上翻看历史时距底 >40px 就不拽回去） */
+watch(
+  () => taskCards.value.map((c) => `${c.id}:${c.expanded}:${c.logs.length}`).join('|'),
+  async () => {
+    await nextTick()
+    for (const c of taskCards.value) {
+      if (!c.expanded) continue
+      const el = document.querySelector(`.task-logs[data-task="${c.id}"]`)
+      if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 40) el.scrollTop = el.scrollHeight
+    }
+  },
+)
 
 function statusLabel(s) {
-  return s === 'success' ? '已完成' : s === 'running' ? '运行中' : '失败'
+  return s === 'success' ? '已完成' : s === 'running' ? '运行中' : s === 'waiting' ? '等待输入' : '失败'
+}
+
+function statusIcon(s) {
+  return s === 'running' ? '⟳' : s === 'waiting' ? '✋' : s === 'success' ? '✓' : '✕'
 }
 
 const TASK_TYPE_LABELS = {
+  task: '新任务', // focusTask 占位卡：首轮轮询（<1s）就会换成真实类型
   refresh: '刷新榜单',
   contribution: '贡献分析',
   industry: '定向行业分析',
@@ -1141,58 +1204,202 @@ function panelLabel(t) {
 }
 
 function statusTag(s) {
-  return s === 'success' ? 'success' : s === 'running' ? 'primary' : 'danger'
+  return s === 'success' ? 'success' : s === 'running' ? 'primary' : s === 'waiting' ? 'warning' : 'danger'
 }
 
-function togglePanel() {
-  if (panelLogs.value.length) panelOpen.value = !panelOpen.value // 无时间线可展开（如刷新任务）
+// ---------- 任务中心引擎 ----------
+
+const activeCards = computed(() =>
+  taskCards.value.filter((c) => c.status === 'running' || c.status === 'waiting'))
+
+/** 列表项 → 卡片：answers/others 是应答表单的本地态（waiting 用），logs 按需拉。
+ *  reactive 包一层：发现新卡后立即 pullLogs(rawC) 的场景，绕过代理的赋值不会触发渲染。*/
+function makeCard(t) {
+  return reactive({
+    ...t, logs: [], logsLoaded: false, expanded: false,
+    answers: [], others: [], answered: false, submitting: false, miss: 0,
+  })
 }
 
-function closePanel() {
-  panelTask.value = null
-  panelLogs.value = []
-  panelOpen.value = false
+/** 新一轮提问（或问题轮替）时重置表单本地态；唯一选项预选，少一次点击 */
+function resetAnswers(c) {
+  const qs = c.payload?.pending_question?.questions || []
+  c.answers = qs.map((q) => (q.multiSelect ? []
+    : q.options?.length === 1 ? q.options[0].label : ''))
+  c.others = qs.map(() => '')
+  c.answered = false
 }
 
-/** 拉某个任务的最新状态与时间线；返回是否拉取成功（失败多为服务重启后记录丢失）。 */
-async function syncLogs(taskId) {
+/** 单卡拉最新状态与时间线（终态补最后一拉 / 展开中的卡滚动日志 / 滑出列表窗口的兜底）。
+ *  返回是否拉取成功（失败多为记录丢失：服务重启后孤儿任务由后端标 failed，查不到才算丢）。*/
+async function pullLogs(c) {
   try {
-    const task = (await getTask(taskId)).task
-    if (panelTask.value?.id !== taskId) return true // 焦点已被别的入口接管，别覆盖
-    panelTask.value = task
-    panelLogs.value = task.logs || []
+    const { task } = await getTask(c.id)
+    Object.assign(c, task)
+    c.logs = task.logs || []
+    c.logsLoaded = true
     return true
   } catch {
     return false
   }
 }
 
-/** 提交后立即占位 + 定向轮询该任务（1s）：长任务的时间线要秒级可见。
- *  结束后交给 onDone 回退到通用扫描（并发任务/别的入口提交的任务仍由扫描兜住）。*/
-function focusTask(taskId, onDone) {
-  stopPolling() // 暂停通用扫描，避免两个轮询抢同一个面板
-  panelTask.value = {
-    id: taskId, status: 'running', progress: '已提交，等待启动…', payload: {},
-    created_at: new Date().toISOString(),
-  }
-  panelLogs.value = []
-  panelOpen.value = true
-  let fails = 0
-  const onTick = async () => {
-    if (panelTask.value?.id !== taskId) return stopPolling()
-    if (await syncLogs(taskId)) {
-      fails = 0
-      if (panelTask.value?.status !== 'running') {
-        stopPolling()
-        onDone?.()
+async function toggleCardLogs(c) {
+  if (!c.logsLoaded && !c.logs.length) await pullLogs(c)
+  if (!c.logs.length) return // 无时间线可展开（如刷新任务）
+  c.expanded = !c.expanded
+}
+
+function closeCard(c) {
+  taskCards.value = taskCards.value.filter((x) => x.id !== c.id)
+  onDoneMap.delete(c.id)
+  scheduleCenter() // 卡全空了要降到心跳频率
+}
+
+function clearDoneCards() {
+  taskCards.value = taskCards.value.filter((c) => c.status === 'running' || c.status === 'waiting')
+}
+
+/** 刚到终态：补全量时间线 + 触发提交处注册的刷新回调 */
+async function finalizeCard(c) {
+  await pullLogs(c)
+  const cb = onDoneMap.get(c.id)
+  onDoneMap.delete(c.id)
+  cb?.()
+}
+
+/** 统一轮询：列表扫新卡、更新在册卡、发现终态。有进行中任务 2s，空闲降到 10s 心跳
+ *  （Claude Code 侧跑 /tech 等技能提交的任务也能被 web 端发现）。*/
+async function pollCenter() {
+  if (centerBusy) return
+  centerBusy = true
+  try {
+    const { tasks: list } = await getTasks(15)
+    const byId = new Map(list.map((t) => [t.id, t]))
+    for (const t of list) { // 新出现的进行中任务上卡（外部入口提交的也在此被发现）
+      if ((t.status === 'running' || t.status === 'waiting') && !taskCards.value.some((c) => c.id === t.id)) {
+        const c = makeCard(t)
+        resetAnswers(c)
+        taskCards.value.unshift(c)
+        pullLogs(c) // 预拉一次：卡上能立刻显示 ▼ 展开提示（后续仅展开中的卡才续拉）
+        centerOpen.value = true
       }
-    } else if (++fails >= 5) {
-      stopPolling() // 连续查不到（服务重启后记录没了），别无限轮询
-      onDone?.()
     }
+    for (const c of taskCards.value) {
+      const fresh = byId.get(c.id)
+      const wasActive = c.status === 'running' || c.status === 'waiting'
+      if (fresh) {
+        const pendBefore = c.payload?.pending_question?.id
+        Object.assign(c, fresh)
+        c.miss = 0
+        if (c.status === 'waiting' && c.payload?.pending_question?.id !== pendBefore) resetAnswers(c)
+        const active = c.status === 'running' || c.status === 'waiting'
+        if (wasActive && !active) await finalizeCard(c) // 刚结束：最后一拉拿终态与末行日志
+        else if (active && c.expanded) await pullLogs(c)
+      } else if (wasActive) {
+        // 滑出最近列表窗口（>15 条新任务挤掉）但还在跑：定向兜底；连续查不到才判丢失
+        if (await pullLogs(c)) {
+          c.miss = 0
+          if (c.status !== 'running' && c.status !== 'waiting') await finalizeCard(c)
+        } else if (++c.miss >= 3) {
+          c.status = 'failed'
+          c.error = '任务记录已丢失（服务可能已重启）'
+          await finalizeCard(c)
+        }
+      }
+    }
+  } catch { /* 后端暂不可达：保留现状下一轮再试 */ } finally {
+    centerBusy = false
   }
-  onTick()
-  pollTimer = setInterval(onTick, 1000)
+  scheduleCenter() // 按最新活跃数调整轮询频率
+}
+
+function scheduleCenter() {
+  if (centerTimer) clearInterval(centerTimer)
+  centerTimer = setInterval(pollCenter, activeCards.value.length ? 2000 : 10000)
+}
+
+function startCenter() {
+  if (!centerTimer) scheduleCenter()
+  pollCenter()
+}
+
+function stopCenter() {
+  if (centerTimer) clearInterval(centerTimer)
+  centerTimer = null
+}
+
+/** 提交后立即上卡占位（时间线秒级可见）+ 注册终态回调；轮询交给任务中心统一驱动。
+ *  签名与旧版一致：focusTask(taskId, onDone)。*/
+function focusTask(taskId, onDone) {
+  if (onDone) onDoneMap.set(taskId, onDone)
+  if (!taskCards.value.some((c) => c.id === taskId)) {
+    const c = makeCard({
+      id: taskId, type: 'task', status: 'running', progress: '已提交，等待启动…', payload: {},
+      created_at: new Date().toISOString(),
+    })
+    c.expanded = true // 自己提交的任务默认展开时间线
+    taskCards.value.unshift(c)
+  }
+  centerOpen.value = true
+  startCenter()
+}
+
+// ---------- waiting 应答 ----------
+
+async function submitAnswer(c) {
+  const pending = c.payload?.pending_question
+  if (!pending) return
+  const answers = pending.questions.map((q, i) => {
+    const raw = c.answers[i]
+    let answer
+    if (Array.isArray(raw)) { // 多选：「其他」的补充文本并入
+      const labels = raw.filter((v) => v !== '__other__')
+      if (raw.includes('__other__') && (c.others[i] || '').trim()) labels.push(c.others[i].trim())
+      answer = labels.join('、')
+    } else if (raw === '__other__') {
+      answer = (c.others[i] || '').trim()
+    } else {
+      answer = (raw || '').trim()
+    }
+    return { question: q.question, answer }
+  })
+  const missing = answers.findIndex((a) => !a.answer)
+  if (missing >= 0) {
+    ElMessage.warning(`第 ${missing + 1} 题还没作答`)
+    return
+  }
+  c.submitting = true
+  try {
+    await answerTask(c.id, { id: pending.id, answers })
+    c.answered = true // 表单收起；工具侧消费后 waiting→running，卡片回到运行态
+    ElMessage.success('已提交，任务继续执行')
+  } catch (e) {
+    ElMessage.error(`应答失败：${e.message}`) // 409 多为问题已轮替：重拉拿新表单
+    await pullLogs(c)
+    if (c.status === 'waiting') resetAnswers(c)
+  } finally {
+    c.submitting = false
+  }
+}
+
+async function cancelAnswer(c) {
+  const pending = c.payload?.pending_question
+  if (!pending) return
+  try {
+    await ElMessageBox.confirm('取消应答后任务将以「已取消」结束，确定？', '取消应答', { type: 'warning' })
+  } catch { return }
+  c.submitting = true
+  try {
+    await answerTask(c.id, { id: pending.id, cancel: true })
+    c.answered = true
+  } catch (e) {
+    ElMessage.error(`取消失败：${e.message}`)
+    await pullLogs(c)
+    if (c.status === 'waiting') resetAnswers(c)
+  } finally {
+    c.submitting = false
+  }
 }
 
 function scoreType(v) {
@@ -1343,14 +1550,13 @@ async function confirmIndustry() {
       directions: directions.map(({ raw, tag }) => ({ raw, tag })),
       repos,
     })
-    ElMessage.success(`${directions.length} 个方向的分析已提交，进度见顶部面板`)
+    ElMessage.success(`${directions.length} 个方向的分析已提交，进度见右下角任务中心`)
     parseDialog.value = false
     industryInput.value = ''
     focusTask(taskId, () => {
       loadIndustries()
       loadTags()
       if (activeTab.value === 'repos') loadRepos()
-      startPolling()
     })
   } catch (e) {
     ElMessage.error(e.message)
@@ -1367,7 +1573,6 @@ async function runAutoTag() {
     focusTask(taskId, () => {
       loadTags()
       if (activeTab.value === 'repos') loadRepos()
-      startPolling()
     })
   } catch (e) {
     ElMessage.error(e.message)
@@ -1427,13 +1632,12 @@ async function runScaffold() {
   scaffoldRunning.value = true
   try {
     const { task_id: taskId, request_id: requestId } = await createScaffoldRequest(text)
-    ElMessage.success('需求匹配已提交：LLM 归纳 → 双通道检索 → 双轨评分，进度见顶部面板')
+    ElMessage.success('需求匹配已提交：LLM 归纳 → 双通道检索 → 双轨评分，进度见右下角任务中心')
     scaffoldInput.value = ''
     resetScaffoldPage()
     focusTask(taskId, () => {
       loadScaffolds()
       if (scaffoldVisible.value) openScaffold(requestId) // 抽屉开着就原地刷新结果
-      startPolling()
     })
   } catch (e) {
     ElMessage.error(e.message)
@@ -1466,13 +1670,12 @@ async function rematchScaffoldRow() {
   scaffoldRematching.value = true
   try {
     const { task_id: taskId } = await rematchScaffold(row.id, (text || '').trim())
-    ElMessage.success('已重新提交匹配，进度见顶部面板')
+    ElMessage.success('已重新提交匹配，进度见右下角任务中心')
     scaffoldVisible.value = false
     loadScaffolds()
     focusTask(taskId, () => {
       loadScaffolds()
       openScaffold(row.id)
-      startPolling()
     })
   } catch (e) {
     ElMessage.error(e.message)
@@ -1593,14 +1796,13 @@ async function confirmItems() {
       })),
       splitStack.value,
     )
-    ElMessage.success('选型任务已提交：每条目检索候选并双轨评分，进度见顶部面板')
+    ElMessage.success('选型任务已提交：每条目检索候选并双轨评分，进度见右下角任务中心')
     editingItems.value = false
     await openScaffold(row.id) // 刷成 selecting 态
     loadScaffolds()
     focusTask(taskId, () => {
       loadScaffolds()
       if (scaffoldVisible.value) openScaffold(row.id)
-      startPolling()
     })
   } catch (e) {
     ElMessage.error(e.message)
@@ -1646,14 +1848,13 @@ async function generateScaffold() {
   scaffoldBuilding.value = true
   try {
     const { task_id: taskId } = await submitScaffoldSelection(row.id, selections)
-    ElMessage.success('生成任务已提交：Agent 整合选型产出可启动骨架（数分钟），进度见顶部面板')
+    ElMessage.success('生成任务已提交：Agent 整合选型产出可启动骨架（数分钟），进度见右下角任务中心')
     reselecting.value = false
     await openScaffold(row.id) // 刷成 building 态
     loadScaffolds()
     focusTask(taskId, () => {
       loadScaffolds()
       if (scaffoldVisible.value) openScaffold(row.id)
-      startPolling()
     })
   } catch (e) {
     ElMessage.error(e.message)
@@ -1742,7 +1943,7 @@ async function analyzeSelected() {
   try {
     const { task_id: taskId } = await postAnalyze(picked.value)
     ElMessage.success(`已提交 ${picked.value.length} 个项目的 LLM 精析，完成后切「已精析」查看`)
-    focusTask(taskId, () => { loadRepos(); startPolling(loadRepos) })
+    focusTask(taskId, loadRepos)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -1755,7 +1956,7 @@ async function runTranslate() {
   try {
     const { task_id: taskId } = await postTranslate()
     ElMessage.success('中文简介翻译已提交：已是中文的直接回填，其余由 LLM 翻译提炼')
-    focusTask(taskId, () => { loadRepos(); startPolling(loadRepos) })
+    focusTask(taskId, loadRepos)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -1810,10 +2011,10 @@ async function runAgentCmd() {
   agentRunning.value = true
   try {
     const { task_id: taskId } = await runAgent(prompt)
-    ElMessage.success('AI 命令已提交，进度见顶部面板，结果完成后在「🛠 技能 · 最近执行」查看')
+    ElMessage.success('AI 命令已提交，进度见右下角任务中心，结果完成后在「🛠 技能 · 最近执行」查看')
     agentPrompt.value = ''
     loadSkillTasks()
-    focusTask(taskId, () => { loadSkillTasks(); startPolling(loadSkillTasks) })
+    focusTask(taskId, loadSkillTasks)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -1922,10 +2123,10 @@ async function runSkill() {
   invoking.value = true
   try {
     const { task_id: taskId } = await invokeSkill(currentSkill.value.name, skillArgsBuilt.value)
-    ElMessage.success(`技能 /${currentSkill.value.name} 已提交，进度见顶部面板`)
+    ElMessage.success(`技能 /${currentSkill.value.name} 已提交，进度见右下角任务中心`)
     skillDialog.value = false
     loadSkillTasks()
-    focusTask(taskId, () => { loadSkillTasks(); startPolling(loadSkillTasks) })
+    focusTask(taskId, loadSkillTasks)
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -1945,9 +2146,9 @@ function onSelect(rows) {
 async function refresh() {
   refreshing.value = true
   try {
-    await postRefresh()
-    ElMessage.success('刷新任务已提交')
-    startPolling(() => { loadRepos(); if (activeTab.value === 'issues') loadIssues() })
+    const { task_id: taskId } = await postRefresh()
+    ElMessage.success('刷新任务已提交，进度见右下角任务中心')
+    focusTask(taskId, () => { loadRepos(); if (activeTab.value === 'issues') loadIssues() })
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -1958,9 +2159,9 @@ async function refresh() {
 async function analyzeContribution() {
   contributing.value = true
   try {
-    await postContribute(picked.value)
-    ElMessage.success('贡献分析任务已提交，完成后可在 Issue 榜和贡献报告查看')
-    startPolling(() => { loadRepos(); if (activeTab.value === 'issues') loadIssues() })
+    const { task_id: taskId } = await postContribute(picked.value)
+    ElMessage.success('贡献分析任务已提交，进度见右下角任务中心，完成后可在 Issue 榜查看')
+    focusTask(taskId, () => { loadRepos(); if (activeTab.value === 'issues') loadIssues() })
   } catch (e) {
     ElMessage.error(e.message)
   } finally {
@@ -1978,36 +2179,6 @@ async function openReport(id) {
   reportVisible.value = true
 }
 
-async function pollOnce() {
-  try {
-    const tasks = (await getTasks(5)).tasks
-    const running = tasks.find((t) => t.status === 'running') || null
-    if (running) {
-      panelTask.value = running
-      await syncLogs(running.id) // 列表不带 logs：刷新页面后靠这一下补回时间线并持续滚动
-      return false
-    }
-    stopPolling()
-    // 刚结束：再拉一次拿终态与最后一行日志（进度行本身可能是「处理中…」）；已结束的旧任务不覆盖
-    if (panelTask.value?.status === 'running') await syncLogs(panelTask.value.id)
-    return true
-  } catch { /* 忽略轮询错误 */ }
-  return false
-}
-
-function startPolling(onDone) {
-  stopPolling()
-  pollTimer = setInterval(async () => {
-    if (await pollOnce()) onDone?.()
-  }, 3000)
-  pollOnce()
-}
-
-function stopPolling() {
-  if (pollTimer) clearInterval(pollTimer)
-  pollTimer = null
-}
-
 watch(activeTab, (tab) => {
   if (tab === 'issues' && issues.value.length === 0) loadIssues()
   if (tab === 'issues') loadIssueRepos() // 每次进入都刷新：贡献分析可能新增了有 issue 的项目
@@ -2021,11 +2192,11 @@ onMounted(async () => {
   await loadRepos()
   config.value = await getConfig().catch(() => null)
   loadTags()
-  startPolling() // 扫描到运行中任务就持续跟（刷新页面后进度继续动）；没有任务时 pollOnce 自己停表
+  startCenter() // 首轮扫描：刷新页面后运行中/等待中任务自动上卡继续跟
   tickTimer = setInterval(() => tick.value++, 1000)
 })
 onBeforeUnmount(() => {
-  stopPolling()
+  stopCenter()
   if (tickTimer) clearInterval(tickTimer)
 })
 </script>
@@ -2046,17 +2217,61 @@ body { margin: 0; background: #f6f8fa; font-family: system-ui, 'Microsoft YaHei'
 .repo-select { width: 250px; }
 .picked-hint { color: #8a919f; font-size: 13px; margin-left: auto; }
 .task-alert { margin-bottom: 14px; }
-.task-panel { background: #fff; border: 1px solid #e5e9ef; border-radius: 6px; margin-bottom: 14px; overflow: hidden; }
-.task-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px; cursor: pointer; }
-.task-what { flex-shrink: 0; max-width: 280px; padding-right: 10px; border-right: 1px solid #eef1f5; color: #8a919f; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-msg { flex: 1; font-size: 13px; color: #24292f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.task-err { color: #f56c6c; }
-.task-elapsed { flex-shrink: 0; color: #8a919f; font-size: 12px; font-variant-numeric: tabular-nums; }
-.task-toggle { flex-shrink: 0; color: #a8b0bd; font-size: 11px; }
-.task-logs { max-height: 260px; overflow-y: auto; background: #fbfcfd; border-top: 1px solid #eef1f5; padding: 8px 14px; }
+
+/* ---------- 右下角任务中心 ---------- */
+/* z-index 2400 压过 el-drawer/el-dialog（popup 基准 2000+）：
+   脚手架流程就是抽屉开着跑 338s 生成任务，进度卡必须始终可见 */
+.task-center { position: fixed; right: 20px; bottom: 20px; width: 380px; max-width: calc(100vw - 40px); z-index: 2400; }
+.tc-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: #24292f; border-radius: 8px 8px 0 0; color: #fff; font-size: 13px; }
+.tc-title { font-weight: 600; }
+.tc-count { flex: 1; color: #a8b0bd; font-size: 12px; }
+.tc-clear, .tc-min { cursor: pointer; color: #a8b0bd; font-size: 12px; padding: 0 4px; }
+.tc-clear:hover, .tc-min:hover { color: #fff; }
+.tc-list { display: flex; flex-direction: column; gap: 8px; max-height: min(60vh, 520px); overflow-y: auto; padding: 10px; background: rgba(255, 255, 255, .96); backdrop-filter: blur(6px); border: 1px solid #e5e9ef; border-top: none; border-radius: 0 0 8px 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .12); }
+.tc-card { position: relative; background: #fff; border: 1px solid #e5e9ef; border-radius: 8px; overflow: hidden; }
+.tc-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--tc-accent, #409eff); }
+.tc-running { --tc-accent: #409eff; }
+.tc-waiting { --tc-accent: #e6a23c; animation: tc-pulse 2s ease-in-out infinite; }
+.tc-success { --tc-accent: #67c23a; }
+.tc-failed { --tc-accent: #f56c6c; }
+@keyframes tc-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(230, 162, 60, .4); }
+  50% { box-shadow: 0 0 0 5px rgba(230, 162, 60, 0); }
+}
+/* 运行/等待态顶部细进度条：无真实百分比，走 indeterminate 扫动 */
+.tc-bar { position: relative; height: 3px; overflow: hidden; background: #eef1f5; }
+.tc-bar::after { content: ''; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; background: var(--tc-accent); animation: tc-slide 1.6s ease-in-out infinite; }
+@keyframes tc-slide { 0% { left: -40%; } 100% { left: 100%; } }
+.tc-row { display: flex; align-items: center; gap: 8px; padding: 8px 12px 0 14px; cursor: pointer; }
+.tc-icon { flex-shrink: 0; font-size: 13px; font-weight: 700; color: var(--tc-accent, #409eff); }
+.tc-running .tc-icon { display: inline-block; animation: tc-spin 1.1s linear infinite; }
+@keyframes tc-spin { to { transform: rotate(360deg); } }
+.tc-what { flex: 1; font-size: 13px; font-weight: 600; color: #24292f; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-elapsed { flex-shrink: 0; color: #8a919f; font-size: 12px; font-variant-numeric: tabular-nums; }
+.tc-toggle { flex-shrink: 0; color: #a8b0bd; font-size: 11px; }
+.tc-msg { padding: 3px 12px 8px 14px; font-size: 12px; color: #57606a; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tc-err { color: #f56c6c; }
+.tc-card .task-logs { max-height: 180px; border-top: 1px dashed #eef1f5; }
+.tc-foot { display: flex; align-items: center; gap: 10px; padding: 6px 12px 8px 14px; border-top: 1px dashed #eef1f5; font-size: 12px; }
+.tc-foot-gap { flex: 1; }
+/* waiting 应答表单 */
+.tc-ask { margin: 0 12px 10px 14px; padding: 10px 12px; background: #fdf6ec; border: 1px solid #faecd8; border-radius: 6px; }
+.tc-q { margin-bottom: 10px; }
+.tc-q-text { font-size: 13px; font-weight: 600; color: #24292f; margin-bottom: 6px; }
+.tc-q-desc { color: #8a919f; font-weight: 400; font-size: 12px; }
+.tc-choices { display: flex; flex-direction: column; gap: 4px; align-items: normal; }
+.tc-option { height: auto; white-space: normal; line-height: 1.6; margin-right: 0; }
+.tc-other-input { margin-top: 6px; }
+.tc-ask-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.tc-answered { padding: 0 12px 8px 14px; font-size: 12px; color: #67c23a; }
+/* 收起态胶囊 */
+.tc-pill { display: inline-flex; align-items: center; gap: 8px; background: #24292f; color: #fff; padding: 8px 16px; border-radius: 999px; font-size: 13px; cursor: pointer; box-shadow: 0 4px 12px rgba(27, 31, 36, .25); user-select: none; }
+.tc-pill:hover { background: #3a4152; }
+.tc-pill-spin { width: 12px; height: 12px; border: 2px solid #57606a; border-top-color: #fff; border-radius: 50%; animation: tc-spin 1s linear infinite; }
+.tc-pill-dot { width: 8px; height: 8px; border-radius: 50%; background: #67c23a; }
+.task-logs { max-height: 260px; overflow-y: auto; background: #fbfcfd; padding: 8px 14px; }
 .log-line { font-family: Consolas, 'SFMono-Regular', Menlo, monospace; font-size: 12px; line-height: 1.7; color: #24292f; word-break: break-word; }
 .log-time { margin-right: 8px; color: #a8b0bd; }
-.task-foot { display: flex; align-items: center; gap: 12px; padding: 5px 14px; border-top: 1px solid #eef1f5; font-size: 12px; }
 .repo-title { display: flex; align-items: center; gap: 8px; }
 .repo-name { font-weight: 600; color: #24292f; text-decoration: none; }
 .repo-name:hover { color: #409eff; }

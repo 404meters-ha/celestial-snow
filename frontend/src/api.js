@@ -50,6 +50,8 @@ export const getReport = (id) => apiGet(`/api/reports/${id}`)
 export const getTasks = (limit = 10) => apiGet(`/api/tasks?limit=${limit}`)
 // 单个任务（含 logs 时间线）：列表接口不带 logs，进度面板与刷新恢复用这个
 export const getTask = (id) => apiGet(`/api/tasks/${id}`)
+// 交互式任务应答（waiting 态）：{id: 问题id, answers:[{question,answer}]} 或 {id, cancel:true}
+export const answerTask = (id, body) => apiPost(`/api/tasks/${id}/answer`, body)
 export const getConfig = () => apiGet('/api/config')
 export const getIssues = (params = {}) => {
   const qs = new URLSearchParams()
