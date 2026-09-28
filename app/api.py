@@ -584,6 +584,22 @@ def _scaffold_summary(r: ScaffoldRequest) -> dict:
     }
 
 
+def _latest_build_task(request_id: int) -> dict | None:
+    """该需求最近一次 scaffold_build 任务（创建时间倒序取首条）。
+    任务失败不改 status 是平台约定（models.TaskRun 注释），需求停在 building 态——
+    前端要区分「生成中」与「已失败可重试」只能看任务行。payload.request_id 是 JSON 列，
+    int 走 LIKE 会误匹配 #1/#11，scaffold_build 任务量小，类型过滤后 Python 拣选。"""
+    with SessionLocal() as session:
+        rows = (session.query(TaskRun)
+                .filter(TaskRun.type == "scaffold_build")
+                .order_by(TaskRun.created_at.desc(), TaskRun.id.desc())
+                .all())
+    for row in rows:
+        if (row.payload or {}).get("request_id") == request_id:
+            return {"id": row.id, "status": row.status, "error": row.error or ""}
+    return None
+
+
 def _scaffold_detail(r: ScaffoldRequest) -> dict:
     return {
         **_scaffold_summary(r),
@@ -592,6 +608,7 @@ def _scaffold_detail(r: ScaffoldRequest) -> dict:
         "items": r.items or [],
         "adopt_report_md": r.adopt_report_md,
         "build": r.build or {},
+        "build_task": _latest_build_task(r.id),
     }
 
 

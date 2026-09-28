@@ -840,9 +840,24 @@
           </div>
         </template>
 
-        <div v-else-if="scaffoldDetail.status === 'building'" class="muted">
-          Agent 生成进行中（写项目骨架 + 六件套，预计数分钟），进度见顶部任务面板，完成后
-          <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+        <div v-else-if="scaffoldDetail.status === 'building'">
+          <!-- 任务失败不改 status（平台约定），需求停在 building——看任务行区分失败与进行中 -->
+          <template v-if="scaffoldDetail.build_task?.status === 'failed'">
+            <el-alert type="error" :closable="false" class="task-alert">
+              <template #title>生成失败（可重试；重试会重新生成）</template>
+              {{ scaffoldDetail.build_task.error || '未知原因，看任务时间线末尾' }}
+            </el-alert>
+            <div class="detail-actions">
+              <el-button type="primary" :loading="scaffoldBuilding" @click="retryScaffoldBuild">
+                🔄 重试生成
+              </el-button>
+              <el-button @click="reselectScaffold">改选型后再生成</el-button>
+            </div>
+          </template>
+          <div v-else class="muted">
+            Agent 生成进行中（写项目骨架 + 六件套，预计数分钟），进度见顶部任务面板，完成后
+            <el-button link type="primary" @click="openScaffold(scaffoldDetail.id)">刷新</el-button>
+          </div>
         </div>
 
         <div v-else-if="scaffoldDetail.status === 'selecting'" class="muted">
@@ -1841,10 +1856,24 @@ async function generateScaffold() {
     ElMessage.warning('还有条目未选完（自研也算一种选择）')
     return
   }
-  const selections = (row.items || []).map((it) => ({
+  await submitScaffoldBuild((row.items || []).map((it) => ({
     no: it.no,
     full_name: selChoices.value[it.no] === SELF_DEV ? null : selChoices.value[it.no],
-  }))
+  })))
+}
+
+/** 失败重试：按已落库的选型原样重发（不动选型面板；同组合命中产物缓存则秒回） */
+async function retryScaffoldBuild() {
+  const row = scaffoldDetail.value
+  if (!row) return
+  await submitScaffoldBuild((row.items || []).map((it) => ({
+    no: it.no, full_name: it.selected || null, // selected 为空 = 自研（后端同判）
+  })))
+}
+
+/** 提交集型 → scaffold_build 任务 → 刷成 building 态并跟踪收尾 */
+async function submitScaffoldBuild(selections) {
+  const row = scaffoldDetail.value
   scaffoldBuilding.value = true
   try {
     const { task_id: taskId } = await submitScaffoldSelection(row.id, selections)
