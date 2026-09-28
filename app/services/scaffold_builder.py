@@ -17,8 +17,9 @@ from .llm import LLMClient, LLMNotConfigured, scaffold_base
 
 # 生成轮次上限：整项目 10+ 文件，/tech 课程实测 16 轮起步，60 不够用
 BUILD_MAX_TURNS = 120
-# 单轮输出上限：vendor 默认 openai 回落 8192，整文件写入的轮次不够用
-BUILD_MAX_TOKENS = 16384
+# 单轮输出上限：vendor 默认 openai 回落 8192，整文件写入的轮次不够用；
+# 16k 实测会被「一轮连写多个文件」的长响应顶满（E2E 截断失败），glm-4.7 输出上限远高于 32k
+BUILD_MAX_TOKENS = 32768
 
 PROJECT_ROOT = agent_sdk.PROJECT_ROOT
 SCAFFOLDS_ROOT = PROJECT_ROOT / "scaffolds"

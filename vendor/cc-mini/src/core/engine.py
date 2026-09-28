@@ -18,6 +18,10 @@ _BASE_DELAY = 0.5
 _MAX_DELAY = 32.0
 _JITTER_FACTOR = 0.25
 
+# 单次 submit 内纯文本截断的连续续跑上限：截断响应注入「继续」提示再循环，
+# 超过此数说明模型在该任务上稳定超限（该提高 max_tokens 或拆任务），照旧收尾返回已有内容
+_MAX_TRUNCATION_CONTINUATIONS = 5
+
 
 def _compute_retry_delay(attempt: int, retry_after: float | None = None) -> float:
     """Exponential backoff with jitter, respecting Retry-After if present."""
@@ -214,6 +218,7 @@ class Engine:
         })
         self._persist(self._messages[-1])
 
+        truncation_streak = 0  # 连续截断计数：非截断响应归零，防「续跑→再截断」死循环
         try:
             while True:
                 if self._aborted:
@@ -271,7 +276,8 @@ class Engine:
                                 }, api_duration_s=_api_elapsed, advisor_model=self._advisor_model if self._advisor_enabled else None)
                                 yield ("usage", final.usage)
                             # Warn if response was truncated by max_tokens
-                            if final.stop_reason == "max_tokens":
+                            truncated = final.stop_reason == "max_tokens"
+                            if truncated:
                                 yield ("error", "Response truncated: hit max_tokens limit.")
                             for block in final.content:
                                 if _block_type(block) == "tool_use":
@@ -326,11 +332,52 @@ class Engine:
                     "content": final.content,
                 })
                 self._persist(self._messages[-1])
+                truncation_streak = truncation_streak + 1 if truncated else 0
+
+                tool_results: list[dict] = []
+
+                # 截断响应里可能带参数被拦腰截断、解析失败的工具调用（input 为空 dict）：
+                # 弃执行、直接回错误结果——执行只会落半成品文件；协议要求每个 tool_use
+                # 都有 tool_result 兜底，模型下一轮看到提示会重新发起完整调用
+                if truncated:
+                    intact: list = []
+                    for tu in tool_uses:
+                        if _block_input(tu):
+                            intact.append(tu)
+                            continue
+                        tn, ti = _block_name(tu), _block_input(tu)
+                        damaged_msg = ("该调用因单轮输出上限被截断（参数不完整），未执行；"
+                                       "请重新发起完整调用。")
+                        yield ("tool_call", tn, ti, None)
+                        yield ("tool_result", tn, ti,
+                               ToolResult(content=damaged_msg, is_error=True))
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": _block_id(tu),
+                            "content": damaged_msg,
+                            "is_error": True,
+                        })
+                    tool_uses = intact
 
                 if not tool_uses:
+                    if tool_results:
+                        # 调用全被截断损坏：错误结果回传，模型下一轮重新发起
+                        self._messages.append({"role": "user", "content": tool_results})
+                        self._persist(self._messages[-1])
+                        continue
+                    if truncated and truncation_streak < _MAX_TRUNCATION_CONTINUATIONS:
+                        # 纯文本被截断：注入「继续」提示从中断处续跑，
+                        # 不让一条超限响应直接终结整个 turn（生成类任务的高频死因）
+                        self._messages.append({
+                            "role": "user",
+                            "content": "(system) 上条回复因达到单轮输出上限被截断，"
+                                       "请从中断处继续完成任务，不要重复已输出的内容。",
+                        })
+                        self._persist(self._messages[-1])
+                        yield ("error", f"Truncated response; requesting continuation "
+                                        f"({truncation_streak}/{_MAX_TRUNCATION_CONTINUATIONS})...")
+                        continue
                     break
-
-                tool_results = []
 
                 # Partition into batches: consecutive read-only tools run in
                 # parallel; a non-read-only tool runs alone.
