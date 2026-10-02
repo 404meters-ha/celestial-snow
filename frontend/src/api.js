@@ -109,11 +109,13 @@ export const getBook = (id) => apiGet(`/api/books/${id}`)
 export const deleteBook = (id) => apiDelete(`/api/books/${id}`)
 export const createBookSeries = (id, chapterNos) =>
   apiPost(`/api/books/${id}/series`, { chapter_nos: chapterNos })
-// 导入已生成好的教程包（zip）：解压注册进课程列表，旧 course_id 由平台改写
-export const importCourse = (file, title = '') => {
+// 导入已生成好的教程包（zip）：解压注册进课程列表，旧 course_id 由平台改写；
+// series 可空——填了归入该系列，同系列课在列表里聚拢排序
+export const importCourse = (file, title = '', series = '') => {
   const form = new FormData()
   form.append('file', file)
   form.append('title', title)
+  form.append('series', series)
   return apiUpload('/api/courses/import', form)
 }
 // 通用技能调用：内置 Agent SDK 执行（SKILL.md 正文注入 prompt），技能文件现读即时生效

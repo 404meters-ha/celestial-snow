@@ -55,6 +55,8 @@ def _migrate() -> None:
         course_columns = {c["name"] for c in inspect(engine).get_columns("courses")}
         if "publish" not in course_columns:
             conn.execute(text("ALTER TABLE courses ADD COLUMN publish JSON DEFAULT '{}'"))
+        if "series" not in course_columns:
+            conn.execute(text("ALTER TABLE courses ADD COLUMN series VARCHAR(200)"))
         task_columns = {c["name"] for c in inspect(engine).get_columns("task_runs")}
         if "logs" not in task_columns:
             conn.execute(text("ALTER TABLE task_runs ADD COLUMN logs JSON DEFAULT '[]'"))

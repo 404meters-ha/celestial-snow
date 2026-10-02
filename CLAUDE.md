@@ -32,9 +32,10 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 - `GET /api/books`（列表）/ `GET /api/books/{id}`（含 outline）/ `DELETE /api/books/{id}`（删记录与文件，已生成课程保留）
 - `POST /api/books/{id}/series` `{"chapter_nos": [1, 3]}` — 章节系列课：对选中章**逐章**跑 /tech-book（单章模式，参数 `{book_id} 第{N}章`），一章一门课，串行不问询（任务类型 `book_series`）
 - `POST /api/courses` 已多来源化：`source_type` = `issue`|`repo`|`book`|`import` + 对应 `issue_id`/`repo_id`/`book_id`（缺省按入参推断；`replace` 覆盖重生成仅 issue 课支持，repo/book 课另起新课并存）
-- `POST /api/courses/import`（multipart：`file`=zip、`title` 可空）— 导入已生成好的教程包（/tech 产物结构或其发布副本）：
+- `POST /api/courses/import`（multipart：`file`=zip、`title` 可空、`series` 可空）— 导入已生成好的教程包（/tech 产物结构或其发布副本）：
   解压进 `courses/{新id}/`、lesson_id 取页内 quiz-spec 内嵌值（发布副本中文名文件也对得上）、页面写死的旧 `course_id` 由平台改写成新 id
-  （quiz 进度才能对上）、剥 `CELESTIAL_PUBLISHED` 标记、缺 `assets/quiz.js` 补默认件；zip 中文文件名按 cp437→gbk 重解码
+  （quiz 进度才能对上）、剥 `CELESTIAL_PUBLISHED` 标记、缺 `assets/quiz.js` 补默认件；zip 中文文件名按 cp437→gbk 重解码；
+  `series` 填了则归入该系列（`courses.series` 列，同系列课在前端聚拢、按导入顺序编「第N门」，选项随 `GET /api/courses` 的 `series_options` 下发）
 - `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到服务器本地磁盘（`LOCAL_PUBLISH_DIR`，默认 `./published`，平台静态托管在 `/published`），返回 `entry_url` 等清单
   （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件；nginx 接管时改 `LOCAL_PUBLISH_BASE_URL`）
 - `GET /api/tasks?limit=N` — 后台任务状态；`GET /api/config` — 配置状态

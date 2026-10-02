@@ -233,6 +233,7 @@ class Course(Base):
     repo：/tech-repo 针对整个项目生成（repo_id 必填）；
     book：/tech-book 针对上传教材生成（book_id 软引用 books.id）；
     import：用户直接上传已生成好的教程包（无外键引用）。
+    series：系列名（导入课归组用，NULL=不属任何系列；同系列课在列表里聚拢、按导入顺序编「第N门」）。
     lessons JSON：[{"lesson_id": "01-overview", "title": "...", "file": "01-overview.html",
     "quiz_count": 4}]——quiz 进度按 lesson_id 与 quiz_results 对账。
     publish JSON：最近一次发布到服务器目录的清单（文件夹、入口 URL、文件列表、时间）。
@@ -250,6 +251,7 @@ class Course(Base):
     lessons: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), default="learning")  # learning|done
     publish: Mapped[dict] = mapped_column(JSON, default=dict)  # 最近一次发布清单
+    series: Mapped[str | None] = mapped_column(String(200))  # 系列名，导入课归组（教材系列走 book_id，不用这列）
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     repo: Mapped[Repo | None] = relationship()

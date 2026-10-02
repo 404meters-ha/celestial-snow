@@ -450,7 +450,7 @@
                     <span class="repo-attr">📖 教材课</span>{{ c.book_title || '（教材已删）' }}
                   </template>
                   <template v-else-if="c.source_type === 'import'">
-                    <span class="repo-attr">📦 导入</span>{{ (c.created_at || '').slice(0, 10) }} 上传
+                    <span class="repo-attr">📦 导入</span>{{ c.series ? `${c.series} · 第${c.series_no}门 · ` : '' }}{{ (c.created_at || '').slice(0, 10) }} 上传
                   </template>
                   <template v-else>
                     <span class="repo-attr">{{ c.repo }} #{{ c.issue_number }}</span>{{ c.issue_title }}
@@ -1038,6 +1038,10 @@
         <el-input v-model="importTitle" placeholder="课程标题（可空，取压缩包首页标题）"
           style="flex: 1" @keyup.enter="submitImport" />
       </div>
+      <el-select v-model="importSeries" style="width: 100%; margin-top: 10px"
+        filterable allow-create clearable placeholder="选择或输入系列名（可空）——同系列课聚拢显示">
+        <el-option v-for="s in seriesOptions" :key="s" :label="s" :value="s" />
+      </el-select>
       <template #footer>
         <el-button @click="importVisible = false">取消</el-button>
         <el-button type="primary" :loading="importing" :disabled="!importFile"
@@ -1265,7 +1269,9 @@ const seriesStarting = ref(false)
 const importVisible = ref(false)
 const importFile = ref(null)
 const importTitle = ref('')
+const importSeries = ref('')
 const importing = ref(false)
+const seriesOptions = ref([])
 const agentPrompt = ref('')
 const agentRunning = ref(false)
 const agentInput = ref(null)
@@ -2160,10 +2166,38 @@ async function runTranslate() {
   }
 }
 
+// 系列课聚拢：同系列相邻成块（导入顺序第1门在前），块的位置取该系列最新一门所在处，
+// 无系列的课保持原有相对次序；并给每门标 series_no（第N门）供卡片展示
+function clusterSeriesCourses(list) {
+  const members = new Map()
+  for (const c of list) {
+    if (!c.series) continue
+    if (!members.has(c.series)) members.set(c.series, [])
+    members.get(c.series).push(c)
+  }
+  const out = []
+  const emitted = new Set()
+  for (const c of list) {
+    if (!c.series) { out.push(c); continue }
+    if (emitted.has(c.series)) continue
+    emitted.add(c.series)
+    out.push(...[...members.get(c.series)].reverse())  // 列表是创建时间倒序，reverse 得导入顺序
+  }
+  const no = new Map()
+  for (const c of out) {
+    if (!c.series) continue
+    no.set(c.series, (no.get(c.series) || 0) + 1)
+    c.series_no = no.get(c.series)
+  }
+  return out
+}
+
 async function loadCourses() {
   coursesLoading.value = true
   try {
-    courses.value = (await getCourses()).courses
+    const res = await getCourses()
+    seriesOptions.value = res.series_options || []
+    courses.value = clusterSeriesCourses(res.courses || [])
   } catch (e) {
     ElMessage.error(`加载课程失败：${e.message}`)
   } finally {
@@ -2325,11 +2359,12 @@ async function submitImport() {
   if (!importFile.value) return
   importing.value = true
   try {
-    const course = await importCourse(importFile.value, importTitle.value)
-    ElMessage.success(`已导入《${course.title}》（${course.total_lessons} 课），出现在课程列表`)
+    const course = await importCourse(importFile.value, importTitle.value, importSeries.value)
+    ElMessage.success(`已导入《${course.title}》（${course.total_lessons} 课）${course.series ? `，归入系列「${course.series}」` : ''}`)
     importVisible.value = false
     importFile.value = null
     importTitle.value = ''
+    importSeries.value = ''
     if (activeTab.value === 'learning') loadCourses()
   } catch (e) {
     ElMessage.error(e.message)

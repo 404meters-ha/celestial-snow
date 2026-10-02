@@ -1239,6 +1239,7 @@ def _course_view(session, course: Course, full: bool = False) -> dict:
         "issue_title": course.issue.title if course.issue else "",
         "book_id": course.book_id or None,
         "book_title": book.title if book else None,
+        "series": course.series or None,
         "source_label": source_label,
         "title": course.title,
         "status": course.status,
@@ -1258,7 +1259,15 @@ def list_courses():
         courses = session.scalars(
             select(Course).order_by(Course.created_at.desc())
         ).all()
-        return {"courses": [_course_view(session, c) for c in courses]}
+        # 系列下拉选项：去重、按最近一次使用在前（列表本就是创建时间倒序，首次出现即最新）
+        series_options = []
+        for c in courses:
+            if c.series and c.series not in series_options:
+                series_options.append(c.series)
+        return {
+            "courses": [_course_view(session, c) for c in courses],
+            "series_options": series_options,
+        }
 
 
 @router.get("/courses/{course_id}")
@@ -1582,12 +1591,13 @@ def _extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
 
 
 @router.post("/courses/import")
-async def import_course(file: UploadFile = File(...), title: str = Form("")):
+async def import_course(file: UploadFile = File(...), title: str = Form(""), series: str = Form("")):
     """上传一份已生成好的教程压缩包，解压注册进课程列表（source_type=import）。
 
     接受 /tech 系技能的产物结构（index.html + NN-*.html + assets/…），也接受其发布副本
     （00-课程目录.html + 中文课标题文件名）。课件里写死的旧 course_id 会被改写成新 id；
     缺 assets/quiz.js 时补平台默认件（发布副本通常带，手工打包可能没有）。
+    series 可空：填了则归入该系列（多次导入同名系列即成一组，列表里聚拢、按导入顺序编「第N门」）。
     """
     if not file.filename or not file.filename.lower().endswith(".zip"):
         raise HTTPException(400, "只接受 .zip 压缩包")
@@ -1636,9 +1646,10 @@ async def import_course(file: UploadFile = File(...), title: str = Form("")):
         if not lessons:
             raise HTTPException(400, "压缩包里除首页外没有课件页，构不成一门课")
         course_title = (title or "").strip() or index_title or "导入的课程"
+        series_name = (series or "").strip()[:200] or None
         with SessionLocal() as session:
             course = Course(
-                user_id=1, source_type="import",
+                user_id=1, source_type="import", series=series_name,
                 title=course_title[:500], lessons=lessons, status="learning",
             )
             session.add(course)
