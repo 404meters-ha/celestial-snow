@@ -2871,7 +2871,9 @@ body::after {
 .ai-input { flex: 1; }
 .agent-prompt { color: var(--amber); font-size: 13px; font-family: var(--font-mono); }
 
-/* ---------- Tabs：数字编号导航 ---------- */
+/* ---------- Tabs：HUD 目标框导航 ----------
+   页签是「被锁定的观测目标」：常态灰暗，hover 预亮角标，激活时文字辉光 +
+   左上/右下目标框角标点亮 + 底部能量条流光扫描。 */
 
 .main-tabs > .el-tabs__header {
   margin: 0 0 18px;
@@ -2886,11 +2888,20 @@ body::after {
   height: 46px;
   font-size: 14.5px;
   font-weight: 500;
-  letter-spacing: .02em;
+  letter-spacing: .03em;
   color: var(--text-mid);
 }
 .main-tabs .el-tabs__item:hover { color: var(--text-hi); }
-.main-tabs .el-tabs__item.is-active { color: var(--text-hi); }
+.main-tabs .el-tabs__item.is-active {
+  color: var(--text-hi);
+  text-shadow: 0 0 16px rgba(111, 211, 242, .45);
+}
+.tab-label {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 2px;
+}
 .tab-label i {
   font-family: var(--font-mono);
   font-style: normal;
@@ -2905,11 +2916,54 @@ body::after {
   opacity: 1;
   text-shadow: 0 0 10px rgba(111, 211, 242, .75);
 }
+/* 目标框角标：左上 ⌜ 与右下 ⌟（冰青描边 + 辉光），激活点亮、hover 预亮 */
+.tab-label::before,
+.tab-label::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  opacity: 0;
+  transition: opacity .25s;
+  pointer-events: none;
+}
+.tab-label::before {
+  left: -4px;
+  top: -3px;
+  border-left: 1.5px solid var(--ice);
+  border-top: 1.5px solid var(--ice);
+  filter: drop-shadow(0 0 4px rgba(111, 211, 242, .8));
+}
+.tab-label::after {
+  right: -4px;
+  bottom: -3px;
+  border-right: 1.5px solid var(--ice);
+  border-bottom: 1.5px solid var(--ice);
+  filter: drop-shadow(0 0 4px rgba(111, 211, 242, .8));
+}
+.main-tabs .el-tabs__item:hover .tab-label::before,
+.main-tabs .el-tabs__item:hover .tab-label::after { opacity: .35; }
+.el-tabs__item.is-active .tab-label::before,
+.el-tabs__item.is-active .tab-label::after { opacity: 1; }
+/* 激活指示条：能量条 + 周期流光扫描 */
 .main-tabs .el-tabs__active-bar {
   height: 2px;
   border-radius: 2px;
-  background: linear-gradient(90deg, #6fd3f2, #a5b4fc);
+  background: linear-gradient(90deg, transparent, #6fd3f2 22%, #a5b4fc 50%, #6fd3f2 78%, transparent);
   box-shadow: 0 0 12px rgba(111, 211, 242, .55);
+  overflow: hidden;
+}
+.main-tabs .el-tabs__active-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .8), transparent);
+  animation: tab-sweep 2.8s linear infinite;
+}
+@keyframes tab-sweep {
+  0% { transform: translateX(-130%); }
+  55%, 100% { transform: translateX(330%); }
 }
 
 /* ---------- 面板（tab 内容容器） ---------- */
@@ -2972,6 +3026,36 @@ body::after {
   box-shadow: inset 0 0 0 1px rgba(111, 211, 242, .18), 0 0 14px rgba(111, 211, 242, .10);
 }
 .toolbar .el-checkbox__label { font-size: 13px; color: var(--text-mid); }
+
+/* 复选/单选：与按钮同一套描边辉光语言（替代 EP 默认的实心蓝底白勾） */
+html.dark .el-checkbox__inner {
+  background: rgba(111, 211, 242, .06);
+  border-color: rgba(111, 211, 242, .45);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04);
+  transition: background-color .18s, border-color .18s, box-shadow .18s;
+}
+html.dark .el-checkbox__inner:hover { border-color: var(--ice); }
+html.dark .el-checkbox__input.is-checked .el-checkbox__inner,
+html.dark .el-checkbox__input.is-indeterminate .el-checkbox__inner {
+  background: rgba(111, 211, 242, .18);
+  border-color: var(--ice);
+  box-shadow: 0 0 10px rgba(111, 211, 242, .28);
+}
+html.dark .el-checkbox__input.is-checked .el-checkbox__inner::after { border-color: #cbf1fd; }
+html.dark .el-checkbox__input.is-indeterminate .el-checkbox__inner::before { background: #cbf1fd; }
+html.dark .el-radio__inner {
+  background: rgba(111, 211, 242, .06);
+  border-color: rgba(111, 211, 242, .45);
+  transition: background-color .18s, border-color .18s, box-shadow .18s;
+}
+html.dark .el-radio__inner:hover { border-color: var(--ice); }
+html.dark .el-radio__input.is-checked .el-radio__inner {
+  background: rgba(111, 211, 242, .2);
+  border-color: var(--ice);
+  box-shadow: 0 0 10px rgba(111, 211, 242, .3);
+}
+html.dark .el-radio__input.is-checked .el-radio__inner::after { background: #d9f6fe; }
+html.dark .el-radio__input.is-checked + .el-radio__label { color: var(--text-hi); }
 
 /* ---------- 提示条（el-alert 改造为注释行） ---------- */
 
@@ -3088,68 +3172,108 @@ body::after {
   --el-tag-text-color: #a8b7cc;
 }
 
-/* ---------- 按钮 ---------- */
+/* ---------- 按钮：HUD 描边辉光（无实心填充） ----------
+   形制统一为「透明暗底 + 类型色描边 + 同色文字」：常态克制，hover 点亮边框并外扩辉光，
+   按压内收。类型色经 --btn-accent（R,G,B）供 box-shadow 复用；link 变体不吃底色。 */
 
-.el-button { border-radius: 7px; font-family: var(--font-display); }
+.el-button {
+  border-radius: 7px;
+  font-family: var(--font-display);
+  letter-spacing: .02em;
+  transition: color .18s, background-color .18s, border-color .18s, box-shadow .18s;
+}
+/* 无类型的默认按钮：中性细描边 */
+html.dark .el-button {
+  --btn-accent: 148, 180, 220;
+  --el-button-text-color: var(--text-mid);
+  --el-button-bg-color: rgba(148, 180, 220, .04);
+  --el-button-border-color: rgba(148, 180, 220, .26);
+  --el-button-hover-text-color: var(--text-hi);
+  --el-button-hover-bg-color: rgba(148, 180, 220, .10);
+  --el-button-hover-border-color: rgba(148, 180, 220, .52);
+  --el-button-active-text-color: var(--text-hi);
+  --el-button-active-bg-color: rgba(148, 180, 220, .14);
+  --el-button-active-border-color: rgba(148, 180, 220, .62);
+  --el-button-disabled-text-color: var(--text-low);
+  --el-button-disabled-bg-color: transparent;
+  --el-button-disabled-border-color: rgba(148, 180, 220, .14);
+}
 html.dark .el-button--primary {
-  --el-button-text-color: #04222e;
-  --el-button-bg-color: var(--ice);
-  --el-button-border-color: var(--ice);
-  --el-button-hover-text-color: #04222e;
-  --el-button-hover-bg-color: #93e0f7;
-  --el-button-hover-border-color: #93e0f7;
-  --el-button-active-bg-color: #58bcd9;
-  --el-button-active-border-color: #58bcd9;
-  --el-button-disabled-text-color: rgba(4, 34, 46, .55);
-  --el-button-disabled-bg-color: rgba(111, 211, 242, .38);
-  --el-button-disabled-border-color: transparent;
-  box-shadow: 0 4px 18px -6px rgba(111, 211, 242, .45);
+  --btn-accent: 111, 211, 242;
+  --el-button-text-color: var(--ice);
+  --el-button-bg-color: rgba(111, 211, 242, .07);
+  --el-button-border-color: rgba(111, 211, 242, .48);
+  --el-button-hover-text-color: #b5ecfb;
+  --el-button-hover-bg-color: rgba(111, 211, 242, .16);
+  --el-button-hover-border-color: var(--ice);
+  --el-button-active-text-color: #e2f7fe;
+  --el-button-active-bg-color: rgba(111, 211, 242, .24);
+  --el-button-active-border-color: #a4e2f8;
+  --el-button-disabled-text-color: rgba(111, 211, 242, .38);
+  --el-button-disabled-bg-color: rgba(111, 211, 242, .03);
+  --el-button-disabled-border-color: rgba(111, 211, 242, .18);
 }
 html.dark .el-button--success {
-  --el-button-text-color: #032b1e;
-  --el-button-bg-color: var(--mint);
-  --el-button-border-color: var(--mint);
-  --el-button-hover-text-color: #032b1e;
-  --el-button-hover-bg-color: #5ce0ac;
-  --el-button-hover-border-color: #5ce0ac;
-  --el-button-active-bg-color: #258f6d;
-  --el-button-active-border-color: #258f6d;
-  --el-button-disabled-text-color: rgba(3, 43, 30, .55);
-  --el-button-disabled-bg-color: rgba(52, 211, 153, .38);
-  --el-button-disabled-border-color: transparent;
+  --btn-accent: 52, 211, 153;
+  --el-button-text-color: #6ee7b7;
+  --el-button-bg-color: rgba(52, 211, 153, .07);
+  --el-button-border-color: rgba(52, 211, 153, .46);
+  --el-button-hover-text-color: #9ff3cf;
+  --el-button-hover-bg-color: rgba(52, 211, 153, .15);
+  --el-button-hover-border-color: var(--mint);
+  --el-button-active-text-color: #d3fae8;
+  --el-button-active-bg-color: rgba(52, 211, 153, .22);
+  --el-button-active-border-color: #7fe7bb;
+  --el-button-disabled-text-color: rgba(52, 211, 153, .38);
+  --el-button-disabled-bg-color: rgba(52, 211, 153, .03);
+  --el-button-disabled-border-color: rgba(52, 211, 153, .18);
 }
 html.dark .el-button--warning {
-  --el-button-text-color: #2b1e02;
-  --el-button-bg-color: var(--amber);
-  --el-button-border-color: var(--amber);
-  --el-button-hover-text-color: #2b1e02;
-  --el-button-hover-bg-color: #fcc953;
-  --el-button-hover-border-color: #fcc953;
-  --el-button-active-bg-color: #c7972f;
-  --el-button-active-border-color: #c7972f;
-  --el-button-disabled-text-color: rgba(43, 30, 2, .55);
-  --el-button-disabled-bg-color: rgba(251, 191, 36, .38);
-  --el-button-disabled-border-color: transparent;
+  --btn-accent: 251, 191, 36;
+  --el-button-text-color: #fcd34d;
+  --el-button-bg-color: rgba(251, 191, 36, .06);
+  --el-button-border-color: rgba(251, 191, 36, .48);
+  --el-button-hover-text-color: #fde08a;
+  --el-button-hover-bg-color: rgba(251, 191, 36, .14);
+  --el-button-hover-border-color: var(--amber);
+  --el-button-active-text-color: #fef0c6;
+  --el-button-active-bg-color: rgba(251, 191, 36, .2);
+  --el-button-active-border-color: #fcd765;
+  --el-button-disabled-text-color: rgba(251, 191, 36, .38);
+  --el-button-disabled-bg-color: rgba(251, 191, 36, .03);
+  --el-button-disabled-border-color: rgba(251, 191, 36, .18);
+}
+html.dark .el-button--danger {
+  --btn-accent: 251, 113, 133;
+  --el-button-text-color: #fda4af;
+  --el-button-bg-color: rgba(251, 113, 133, .06);
+  --el-button-border-color: rgba(251, 113, 133, .48);
+  --el-button-hover-text-color: #fec4cc;
+  --el-button-hover-bg-color: rgba(251, 113, 133, .14);
+  --el-button-hover-border-color: var(--rose);
+  --el-button-active-text-color: #fee3e8;
+  --el-button-active-bg-color: rgba(251, 113, 133, .2);
+  --el-button-active-border-color: #fd8ba0;
+  --el-button-disabled-text-color: rgba(251, 113, 133, .38);
+  --el-button-disabled-bg-color: rgba(251, 113, 133, .03);
+  --el-button-disabled-border-color: rgba(251, 113, 133, .18);
 }
 
-/* link 变体（行内「详情 / 生成课程 / 删除」等）：不吃主按钮的深墨文字，
-   上面按 type 设的 --el-button-text-color 会把 link 文字也染黑，这里翻回来 */
-html.dark .el-button--primary.is-link {
-  --el-button-text-color: var(--ice);
-  --el-button-hover-text-color: var(--ice-soft);
-  --el-button-active-text-color: #4e97b1;
+/* 共同形制：顶缘高光（机加工感）；hover 外扩辉光；按压内收；键盘焦点圈 */
+html.dark .el-button:not(.is-link):not(.is-text) {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .045);
 }
-html.dark .el-button--success.is-link {
-  --el-button-text-color: #6ee7b7;
-  --el-button-hover-text-color: #8fefc9;
+html.dark .el-button:not(.is-link):not(.is-text):not(.is-disabled):hover {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .07),
+              0 0 16px rgba(var(--btn-accent), .24),
+              inset 0 0 14px rgba(var(--btn-accent), .08);
 }
-html.dark .el-button--warning.is-link {
-  --el-button-text-color: #fcd34d;
-  --el-button-hover-text-color: #fde08a;
+html.dark .el-button:not(.is-link):not(.is-text):not(.is-disabled):active {
+  box-shadow: inset 0 2px 8px rgba(0, 0, 0, .35), inset 0 0 10px rgba(var(--btn-accent), .12);
 }
-html.dark .el-button--danger.is-link {
-  --el-button-text-color: #fda4af;
-  --el-button-hover-text-color: #fec4cc;
+html.dark .el-button:not(.is-link):focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px rgba(var(--btn-accent), .8), 0 0 18px rgba(var(--btn-accent), .3);
 }
 html.dark .el-button.is-link { background: transparent; }
 
