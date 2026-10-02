@@ -2,6 +2,7 @@
 
 未配置 key 时抛 LLMNotConfigured，由上层决定降级（榜单只显示规则分，不阻塞抓取）。
 """
+import base64
 import json
 import re
 
@@ -24,6 +25,7 @@ class LLMClient:
         self._base_url = s.llm_base_url.rstrip("/")
         self._api_key = s.llm_api_key
         self._model = s.llm_model
+        self._vision_model = s.llm_vision_model
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={"Authorization": f"Bearer {self._api_key}"},
@@ -59,13 +61,42 @@ class LLMClient:
         except (KeyError, IndexError) as e:
             raise LLMError(f"LLM 响应结构异常: {e}") from e
 
-    async def _post_chat(self, messages: list[dict], max_tokens: int, *, thinking: bool) -> dict:
-        payload: dict = {"model": self._model, "messages": messages, "max_tokens": max_tokens}
+    async def chat_vision(self, system: str, prompt: str, image_png: bytes, *, max_tokens: int = 8000) -> str:
+        """多模态单轮：一张 PNG 图片 + 文字指令（扫描版 PDF 逐页转录用）。
+
+        走 OpenAI 兼容的 image_url 消息（data URL base64）；模型用 LLM_VISION_MODEL
+        （flash 档便宜量大，逐页转录成本可控），空则回退主模型。失败重试一次。
+        """
+        if not self.configured:
+            raise LLMNotConfigured("LLM 未配置（LLM_BASE_URL / LLM_API_KEY）")
+        b64 = base64.b64encode(image_png).decode()
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                {"type": "text", "text": prompt},
+            ]},
+        ]
+        model = self._vision_model or self._model
+        last_err: Exception | None = None
+        for _ in range(2):  # 视觉端点偶发 5xx，重试一次
+            try:
+                data = await self._post_chat(messages, max_tokens, thinking=False, model=model)
+                content = (data.get("choices") or [{}])[0].get("message", {}).get("content")
+                if content:
+                    return content
+            except LLMError as e:
+                last_err = e
+        raise LLMError(f"视觉模型转录失败（{model}）：{last_err or '空响应'}")
+
+    async def _post_chat(self, messages: list[dict], max_tokens: int, *, thinking: bool,
+                         model: str | None = None) -> dict:
+        payload: dict = {"model": model or self._model, "messages": messages, "max_tokens": max_tokens}
         if thinking is False:
             payload["thinking"] = {"type": "disabled"}
         resp = await self._client.post("/chat/completions", json=payload)
         if resp.status_code == 400 and "thinking" in resp.text and payload.get("thinking"):
-            return await self._post_chat(messages, max_tokens, thinking=True)  # 旧端点不认该字段
+            return await self._post_chat(messages, max_tokens, thinking=True, model=model)  # 旧端点不认该字段
         if resp.status_code != 200:
             raise LLMError(f"LLM 返回 {resp.status_code}: {resp.text[:300]}")
         return resp.json()
@@ -495,3 +526,26 @@ async def scaffold_base(llm: LLMClient, raw_text: str, tech_stack: str, items: l
     user = (f"用户需求：{raw_text}\n主技术栈：{tech_stack or '未定'}\n\n条目与选型：\n"
             + json.dumps(slim, ensure_ascii=False))
     return await llm.chat_json(SCAFFOLD_BASE_SYSTEM, user, max_tokens=800)
+
+
+# ---------- 教材（books） ----------
+
+BOOK_OUTLINE_SYSTEM = """你是教材结构分析器。根据抽样页文本与 PDF 书签，归纳这本书的学习大纲。
+输出严格 JSON（不要 markdown 围栏）：
+{"chapters": [{"no": 章序号(从1起), "title": "章标题", "start": 起始页码(整数), "end": 结束页码(整数),
+               "summary": "本章讲什么（两三句）", "why": "为什么值得学（一句，结合考证/实战）"}]}
+规则：
+- 章按页码升序、首尾相接覆盖全书（第 1 章从第 1 页附近开始，最后一章 end 等于总页数）
+- 页码只能依据抽样页的实际页码与书签页码推算，不确定的边界宁粗勿漏
+- 一般 8-20 章；书签可靠时优先沿用书签的章划分
+- 前言/目录/附录不单独成章（并入第 1 章或最后一章）"""
+
+
+async def book_outline(llm: LLMClient, title: str, pages: int, toc: list[dict], sampled: list[dict]) -> dict:
+    """教材学习大纲：章 → 页范围（页码 1 起、含端点）。"""
+    user = (
+        f"书名：{title or '（未知）'}；总页数：{pages}\n"
+        f"PDF 书签（可能残缺或为空）：{json.dumps(toc, ensure_ascii=False) if toc else '无'}\n\n"
+        f"抽样页（每页开头片段，page 为全书实际页码）：\n{json.dumps(sampled, ensure_ascii=False)}"
+    )
+    return await llm.chat_json(BOOK_OUTLINE_SYSTEM, user, max_tokens=8000)

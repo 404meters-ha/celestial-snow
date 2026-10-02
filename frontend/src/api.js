@@ -32,6 +32,16 @@ async function apiDelete(path) {
   return data
 }
 
+// 文件上传（multipart）：不能预设 Content-Type，浏览器要自动带 boundary
+async function apiUpload(path, form) {
+  const res = await fetch(BASE + path, { method: 'POST', body: form })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) {
+    throw new Error(data.detail || `${res.status} 上传失败`)
+  }
+  return data
+}
+
 // 项目榜：分页（limit/offset）+ 精析状态（analyzed=all|done|todo）+ 榜单期次（period）+ 标签（tag）
 export const getRepos = (params = {}) => {
   const qs = new URLSearchParams()
@@ -87,6 +97,25 @@ export const postCourse = (payload) => apiPost('/api/courses', payload)
 export const getCourses = () => apiGet('/api/courses')
 export const getCourse = (id) => apiGet(`/api/courses/${id}`)
 export const postQuizResult = (payload) => apiPost('/api/quiz-results', payload)
+// 教材（电子书 PDF）：上传解析（后台任务）→ 大纲就绪后 /tech-book 生成教程；章节系列走批量任务
+export const uploadBook = (file, title = '') => {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('title', title)
+  return apiUpload('/api/books', form)
+}
+export const getBooks = () => apiGet('/api/books')
+export const getBook = (id) => apiGet(`/api/books/${id}`)
+export const deleteBook = (id) => apiDelete(`/api/books/${id}`)
+export const createBookSeries = (id, chapterNos) =>
+  apiPost(`/api/books/${id}/series`, { chapter_nos: chapterNos })
+// 导入已生成好的教程包（zip）：解压注册进课程列表，旧 course_id 由平台改写
+export const importCourse = (file, title = '') => {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('title', title)
+  return apiUpload('/api/courses/import', form)
+}
 // 通用技能调用：内置 Agent SDK 执行（SKILL.md 正文注入 prompt），技能文件现读即时生效
 export const getSkills = () => apiGet('/api/skills')
 export const invokeSkill = (name, args = '') => apiPost(`/api/skills/${name}/invoke`, { args })

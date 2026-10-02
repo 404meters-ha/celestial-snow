@@ -59,12 +59,20 @@ def key_root_for(course) -> str:
 
 
 def folder_name(course) -> str:
-    """课程在发布目录里的文件夹名：{id}-{repo}-issue{n}-{标题}。"""
-    repo_name = (course.repo.full_name if course.repo else "").split("/")[-1] or "repo"
+    """课程在发布目录里的文件夹名（按来源分支）：
+
+    issue：{id}-{repo}-issue{n}-{标题}；repo：{id}-{repo}-{标题}；
+    book：{id}-教材-{标题}（标题里通常已带书名·章节）；import：{id}-{标题}。
+    """
+    source = getattr(course, "source_type", None) or "issue"
     issue_no = course.issue.number if course.issue else None
-    parts = [str(course.id), safe_name(repo_name, "repo", 40)]
-    if issue_no is not None:
-        parts.append(f"issue{issue_no}")
+    parts = [str(course.id)]
+    if course.repo:  # issue / repo 课都有仓库段
+        parts.append(safe_name(course.repo.full_name.split("/")[-1] or "repo", "repo", 40))
+        if source == "issue" and issue_no is not None:
+            parts.append(f"issue{issue_no}")
+    elif source == "book":
+        parts.append("教材")
     parts.append(safe_name(course.title, "课程", 60))
     return safe_name("-".join(parts), f"course-{course.id}")
 

@@ -60,10 +60,42 @@ def _migrate() -> None:
             conn.execute(text("ALTER TABLE task_runs ADD COLUMN logs JSON DEFAULT '[]'"))
         conn.commit()
 
+    # 学习模块化：旧 courses 的 issue_id/repo_id 是 NOT NULL，课程还要能来自项目/教材/导入。
+    # SQLite 改不了列约束，走「读出 → 重建 → 回填」（表小秒级完成；存量课 source_type 一律 issue）。
+    course_columns = {c["name"] for c in inspect(engine).get_columns("courses")}
+    if "source_type" not in course_columns:
+        _rebuild_courses()
+
     # fixed_hint 是物化列（分页排序用）：存量行按正则一次性回填
     issue_columns = {c["name"] for c in inspect(engine).get_columns("issues")}
     if "fixed_hint" in issue_columns:
         _backfill_fixed_hint()
+
+
+def _rebuild_courses() -> None:
+    """courses 重建为多来源结构（source_type/book_id、issue_id/repo_id 可空）。
+
+    必须用裸 SQL 读旧行——ORM 的 Course 已带新列，SELECT 会在旧表上直接报缺列。
+    lessons/publish 裸读出来就是 JSON 文本，原样写回；book_id 旧表没有，回填 0。
+    """
+    from sqlalchemy import text
+
+    from .models import Course
+
+    legacy_cols = "id, user_id, repo_id, issue_id, title, lessons, status, publish, created_at"
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(text(f"SELECT {legacy_cols} FROM courses"))]
+    with engine.begin() as conn:
+        # 索引随表一起删，避免 create_all 重建同名索引冲突
+        conn.execute(text("DROP TABLE courses"))
+    Base.metadata.create_all(engine, tables=[Course.__table__])
+    with engine.begin() as conn:
+        for r in rows:
+            conn.execute(text(
+                f"INSERT INTO courses ({legacy_cols}, book_id, source_type)"
+                " VALUES (:id, :user_id, :repo_id, :issue_id, :title, :lessons, :status,"
+                " :publish, :created_at, 0, 'issue')"
+            ), r)
 
 
 def _backfill_fixed_hint() -> None:

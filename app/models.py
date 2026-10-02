@@ -204,9 +204,35 @@ class IndustryReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
-class Course(Base):
-    """一门课程：/tech 针对某个 issue 一次性生成，HTML 托管于顶层 courses/{id}/。
+class Book(Base):
+    """一本上传的电子书教材（PDF）：解析成逐页文本 + 学习大纲后，供 /tech-book 生成课程。
 
+    存储布局（agent 经 ReadFile 读，uploads 已进 READ_ROOTS）：
+      uploads/books/{id}/book.pdf        原始上传
+      uploads/books/{id}/text/pNNNN.txt  第 N 页全文（文本层直抽；扫描页为视觉模型转录）
+    outline JSON：{"chapters": [{"no", "title", "start", "end", "summary", "why"}]}（页码 1 起、含端点）。
+    """
+
+    __tablename__ = "books"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), default="")  # 书名（用户填或从内容推断）
+    filename: Mapped[str] = mapped_column(String(512), default="")  # 原始上传文件名
+    pages: Mapped[int] = mapped_column(Integer, default=0)  # 总页数
+    status: Mapped[str] = mapped_column(String(16), default="extracting")  # extracting|ready|failed
+    note: Mapped[str] = mapped_column(Text, default="")  # 解析备注 / 失败原因
+    outline: Mapped[dict] = mapped_column(JSON, default=dict)
+    stats: Mapped[dict] = mapped_column(JSON, default=dict)  # {chars, text_pages, vision_pages, vision_failed}
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Course(Base):
+    """一门课程：HTML 托管于顶层 courses/{id}/，按来源分四类（source_type）。
+
+    issue：/tech 针对某个 issue 生成（issue_id 必填，repo_id 自动取 issue 所属仓库）；
+    repo：/tech-repo 针对整个项目生成（repo_id 必填）；
+    book：/tech-book 针对上传教材生成（book_id 软引用 books.id）；
+    import：用户直接上传已生成好的教程包（无外键引用）。
     lessons JSON：[{"lesson_id": "01-overview", "title": "...", "file": "01-overview.html",
     "quiz_count": 4}]——quiz 进度按 lesson_id 与 quiz_results 对账。
     publish JSON：最近一次发布到服务器目录的清单（文件夹、入口 URL、文件列表、时间）。
@@ -216,16 +242,18 @@ class Course(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, default=1, index=True)  # 多用户预留，当前恒为 1
-    repo_id: Mapped[int] = mapped_column(ForeignKey("repos.id"), index=True)
-    issue_id: Mapped[int] = mapped_column(ForeignKey("issues.id"), index=True)
+    source_type: Mapped[str] = mapped_column(String(16), default="issue", index=True)
+    repo_id: Mapped[int | None] = mapped_column(ForeignKey("repos.id"), index=True)
+    issue_id: Mapped[int | None] = mapped_column(ForeignKey("issues.id"), index=True)
+    book_id: Mapped[int] = mapped_column(Integer, default=0, index=True)  # 软引用 books.id（迁移列加不了 FK，统一不设约束）
     title: Mapped[str] = mapped_column(String(512), default="")
     lessons: Mapped[list] = mapped_column(JSON, default=list)
     status: Mapped[str] = mapped_column(String(16), default="learning")  # learning|done
     publish: Mapped[dict] = mapped_column(JSON, default=dict)  # 最近一次发布清单
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
-    repo: Mapped[Repo] = relationship()
-    issue: Mapped[Issue] = relationship()
+    repo: Mapped[Repo | None] = relationship()
+    issue: Mapped[Issue | None] = relationship()
 
 
 class QuizResult(Base):

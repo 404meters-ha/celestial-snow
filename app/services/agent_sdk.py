@@ -21,10 +21,11 @@ from . import askuser
 
 MAX_TURNS = 60  # API 轮次上限，防失控（课程生成一类任务工具调用多，40 不够用）
 
-# 文件白名单：agent 只能碰产物子树。读=技能资产模板+课程+脚手架；写=课程产物+脚手架工作区。
+# 文件白名单：agent 只能碰产物子树。读=技能资产模板+课程+脚手架+教材页文本；写=课程产物+脚手架工作区。
 # .env / 源码 / 数据库都在白名单外——LLM 拿不到凭据是底线。
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-READ_ROOTS = [PROJECT_ROOT / ".claude" / "skills", PROJECT_ROOT / "courses", PROJECT_ROOT / "scaffolds"]
+READ_ROOTS = [PROJECT_ROOT / ".claude" / "skills", PROJECT_ROOT / "courses", PROJECT_ROOT / "scaffolds",
+              PROJECT_ROOT / "uploads"]
 WRITE_ROOTS = [PROJECT_ROOT / "courses", PROJECT_ROOT / "scaffolds"]
 TEXT_LOG_INTERVAL = 2.5  # 生成期进度上报的最小间隔（秒）；阈值只看时间不看字符数，
 # 否则慢流（每块几十字符）永远够不到门槛，界面又冻住
@@ -151,8 +152,9 @@ class ReadFileTool(Tool):
 
     @property
     def description(self) -> str:
-        return ("读取一个文本文件的内容（带行号）。只能读 .claude/skills/、courses/ 与 scaffolds/ 下的文件；"
-                "路径可写相对项目根的（如 .claude/skills/tech/assets/quiz.js）或绝对路径。")
+        return ("读取一个文本文件的内容（带行号）。只能读 .claude/skills/、courses/、scaffolds/ 与"
+                " uploads/（教材页文本）下的文件；路径可写相对项目根的"
+                "（如 .claude/skills/tech/assets/quiz.js）或绝对路径。")
 
     @property
     def input_schema(self) -> dict:
@@ -175,7 +177,7 @@ class ReadFileTool(Tool):
     def execute(self, path: str = "", offset: int = 0, limit: int = 2000, **_) -> ToolResult:
         p = _resolve_under(path, READ_ROOTS)
         if p is None:
-            return ToolResult(f"拒绝：{path} 不在可读范围（.claude/skills/ 或 courses/）", is_error=True)
+            return ToolResult(f"拒绝：{path} 不在可读范围（.claude/skills/、courses/ 或 uploads/）", is_error=True)
         if not p.exists():
             return ToolResult(f"文件不存在：{path}", is_error=True)
         if not p.is_file():
@@ -345,11 +347,13 @@ def _system_prompt(interactive: bool = False) -> str:
     s = get_settings()
     tools_line = (
         "- 你运行在云服务进程内，没有 Shell。工具六件：WebFetch（抓远程网页/GitHub）、PlatformAPI（调本平台 API）、\n"
-        "  ReadFile（读 .claude/skills/、courses/、scaffolds/ 下文件）、ListDir（列这些目录核对产物）、WriteFile（只能写 courses/ 或 scaffolds/ 下）、\n"
+        "  ReadFile（读 .claude/skills/、courses/、scaffolds/、uploads/ 下文件）、ListDir（列这些目录核对产物）、"
+        "WriteFile（只能写 courses/ 或 scaffolds/ 下）、\n"
         "  AskUserQuestion（向用户提问并等待应答，用法见下方「向用户提问」段）。"
         if interactive else
         "- 你运行在云服务进程内，没有 Shell。工具四个：WebFetch（抓远程网页/GitHub）、PlatformAPI（调本平台 API）、\n"
-        "  ReadFile/ListDir（读 .claude/skills/ 技能资产与 courses/、scaffolds/ 产物文件）、WriteFile（只能写 courses/ 或 scaffolds/ 下）。"
+        "  ReadFile/ListDir（读 .claude/skills/ 技能资产与 courses/、scaffolds/、uploads/ 产物文件）、"
+        "WriteFile（只能写 courses/ 或 scaffolds/ 下）。"
     )
     ask_section = (
         "\n## 向用户提问\n"
@@ -368,10 +372,13 @@ def _system_prompt(interactive: bool = False) -> str:
 - 分析对象是 GitHub 上的开源项目代码与 issue：一切信息通过网络获取，禁止凭空编造。
 {ask_section}
 ## 平台工具手册（生成课程一类任务用）
-- 平台 API 一律走 PlatformAPI，不要用 WebFetch 打本机地址：取学习上下文 GET /api/learning-context/{{issue_id}}；
-  注册课程 POST /api/courses（body 含 issue_id/title/lessons）；发布课程 POST /api/courses/{{id}}/publish（重生成后加 body {{"prune": true}}）。
+- 平台 API 一律走 PlatformAPI，不要用 WebFetch 打本机地址：取学习上下文
+  GET /api/learning-context/{{issue_id}}（issue 课）/ /api/learning-context/repo/{{repo_id}}（项目课）/
+  /api/learning-context/book/{{book_id}}（教材课）；注册课程 POST /api/courses（body 含
+  source_type 与对应来源 id、title、lessons）；发布课程 POST /api/courses/{{id}}/publish（重生成后加 body {{"prune": true}}）。
 - 课程文件写到 courses/{{course_id}}/ 下（WriteFile 只认这个范围）；assets/style.css 与 assets/quiz.js 等共享模板
   在 .claude/skills/tech/assets/，用 ReadFile 读出后原样 WriteFile 到课程目录，不要自己重写。
+- 教材课的逐页文本在 uploads/books/{{book_id}}/text/pNNNN.txt（ReadFile 可读），N 是页码。
 - 写完用 ListDir 核对 courses/{{course_id}}/ 文件齐全、与注册的 lessons 一致。
 
 ## GitHub 数据获取手册（用 WebFetch 抓）

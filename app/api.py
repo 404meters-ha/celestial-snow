@@ -1,18 +1,23 @@
 """REST API：榜单、详情、刷新、贡献分析、issue 排行、任务进度、学习闭环。"""
+import io
 import json
 import re
 import shutil
+import tempfile
+import zipfile
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import and_, delete, func, or_, select
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
 
 from .config import get_settings
 from .db import SessionLocal
 from .models import (
     Analysis,
+    Book,
     ContributionReport,
     Course,
     IndustryReport,
@@ -23,7 +28,7 @@ from .models import (
     TaskRun,
     utcnow,
 )
-from .services import askuser, course_publish, scoring
+from .services import askuser, course_publish, scoring, skill_runner
 from .services.store import StoreError
 from .services.github_client import GitHubClient
 from .services.industry import (
@@ -34,6 +39,7 @@ from .services.industry import (
 )
 from .services.scaffold import match_pipeline, select_pipeline, split_items
 from .services.scaffold_builder import build_pipeline
+from .services.books import book_dir, extract_pipeline, series_pipeline
 from .services.llm import LLMClient, LLMNotConfigured, scaffold_adopt_report
 from .services.pipeline import (
     MAX_ANALYZE_REPOS,
@@ -1088,10 +1094,106 @@ def learning_context(issue_id: int):
         }
 
 
+@router.get("/learning-context/repo/{repo_id}")
+def learning_context_repo(repo_id: int):
+    """/tech-repo 一次取全：仓库元数据 + 精析（含 README 全文）+ 最新贡献报告 + 高分 issue。"""
+    with SessionLocal() as session:
+        repo = session.get(Repo, repo_id)
+        if repo is None:
+            raise HTTPException(404, "项目不存在")
+        analysis = session.scalar(select(Analysis).where(Analysis.repo_id == repo.id))
+        report = session.scalar(
+            select(ContributionReport)
+            .where(ContributionReport.repo_id == repo.id)
+            .order_by(ContributionReport.created_at.desc())
+        )
+        top_issues = session.execute(
+            select(Issue).where(Issue.repo_id == repo.id, Issue.match_score.is_not(None))
+            .order_by(Issue.match_score.desc(), Issue.id.desc()).limit(5)
+        ).scalars().all()
+        existing = session.scalars(
+            select(Course).where(Course.source_type == "repo", Course.repo_id == repo.id)
+            .order_by(Course.created_at.desc())
+        ).all()
+        return {
+            "repo": {
+                "id": repo.id,
+                "full_name": repo.full_name,
+                "description": repo.description,
+                "zh_desc": repo.zh_desc,
+                "language": repo.language,
+                "topics": repo.topics or [],
+                "homepage": repo.homepage,
+                "license": repo.license,
+                "stars": repo.stars,
+                "forks": repo.forks,
+                "open_issues": repo.open_issues,
+                "contributors_count": repo.contributors_count,
+            },
+            "analysis": None if analysis is None else {
+                "core_idea": analysis.core_idea,
+                "enterprise_cases": analysis.enterprise_cases or [],
+                "llm_scores": analysis.llm_scores or {},
+                "readme": analysis.readme,  # 「项目导览」章的底料，可能很长
+            },
+            "report": None if report is None else {
+                "repo_verdict": report.repo_verdict or {},
+                "stats": report.stats or {},
+            },
+            "top_issues": [{
+                "id": i.id, "number": i.number, "title": i.title, "url": i.url,
+                "difficulty": i.difficulty, "match_score": i.match_score,
+                "summary": i.summary, "learning_status": i.learning_status,
+            } for i in top_issues],
+            "existing_courses": [{
+                "id": c.id, "title": c.title, "status": c.status,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            } for c in existing[:5]],
+        }
+
+
+@router.get("/learning-context/book/{book_id}")
+def learning_context_book(book_id: int):
+    """/tech-book 一次取全：教材元数据 + 学习大纲（章 → 页范围 → 逐页文本文件清单）。"""
+    with SessionLocal() as session:
+        book = session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(404, "教材不存在")
+        if book.status != "ready":
+            raise HTTPException(409, f"教材尚未解析完成（{book.status}）")
+        chapters = []
+        for c in (book.outline or {}).get("chapters", []):
+            start, end = int(c.get("start") or 1), int(c.get("end") or book.pages)
+            chapters.append({
+                **c,
+                "files": [f"p{n:04d}.txt" for n in range(start, min(end, book.pages) + 1)],
+            })
+        existing = session.scalars(
+            select(Course).where(Course.source_type == "book", Course.book_id == book.id)
+            .order_by(Course.created_at.desc())
+        ).all()
+        return {
+            "book": {
+                "id": book.id,
+                "title": book.title,
+                "filename": book.filename,
+                "pages": book.pages,
+                "stats": book.stats or {},
+            },
+            "chapters": chapters,
+            "text_dir": f"uploads/books/{book.id}/text",  # ReadFile 白名单内，页文件 pNNNN.txt
+            "existing_courses": [{
+                "id": c.id, "title": c.title, "status": c.status,
+                "created_at": c.created_at.isoformat() if c.created_at else None,
+            } for c in existing[:10]],
+        }
+
+
 def _course_view(session, course: Course, full: bool = False) -> dict:
     """课程视图：lessons 摊平并附每节 quiz 提交进度。
 
     full=True 时附带发布的逐文件明细（详情页用；列表里不带，避免每门课都驮一份清单）。
+    来源四类（source_type）：issue / repo / book / import——卡片来源行按它分支渲染。
     """
     results = session.scalars(
         select(QuizResult).where(QuizResult.course_id == course.id)
@@ -1115,13 +1217,29 @@ def _course_view(session, course: Course, full: bool = False) -> dict:
     }
     if full and "files" in pub:
         publish["files"] = pub["files"]
+    source_type = course.source_type or "issue"
+    repo_name = course.repo.full_name if course.repo else None
+    book = session.get(Book, course.book_id) if course.book_id else None
+    if source_type == "issue":
+        source_label = f"{repo_name or '?'} #{course.issue.number}" if course.issue else (repo_name or "issue")
+    elif source_type == "repo":
+        source_label = repo_name or "项目"
+    elif source_type == "book":
+        source_label = book.title if book else "教材"
+    else:
+        source_label = "导入的课程"
     return {
         "id": course.id,
         "user_id": course.user_id,
-        "repo": course.repo.full_name if course.repo else "?",
+        "source_type": source_type,
+        "repo": repo_name,
+        "repo_id": course.repo_id,
         "issue_id": course.issue_id,
         "issue_number": course.issue.number if course.issue else None,
         "issue_title": course.issue.title if course.issue else "",
+        "book_id": course.book_id or None,
+        "book_title": book.title if book else None,
+        "source_label": source_label,
         "title": course.title,
         "status": course.status,
         "created_at": course.created_at.isoformat() if course.created_at else None,
@@ -1153,44 +1271,76 @@ def get_course(course_id: int):
 
 
 class CourseCreate(BaseModel):
-    issue_id: int
     title: str
     # [{"lesson_id", "title", "file", "quiz_count"}]
     lessons: list[dict]
-    replace: bool = False  # 覆盖该 issue 已有课程（连 quiz 记录一起清）
+    issue_id: int | None = None  # issue 课必填
+    repo_id: int | None = None  # 项目课必填；issue 课自动取 issue 所属仓库
+    book_id: int | None = None  # 教材课带书 id（软引用）
+    source_type: str = "issue"  # issue|repo|book|import；空/缺省时按已给的 id 推断
+    replace: bool = False  # 覆盖已有课程（连 quiz 记录一起清）——目前仅 issue 课支持
 
 
 @router.post("/courses")
 def create_course(req: CourseCreate):
-    """注册课程元数据返回 course_id；副作用：issue → learning。课程 HTML 由 /tech 写盘。
+    """注册课程元数据返回 course_id。课程 HTML 由 /tech、/tech-repo、/tech-book 写盘。
 
-    replace=True（覆盖重生成）：清掉该 issue 的旧课程记录（连 quiz）**和旧课程目录 courses/{旧id}/
-    ——SDK 模式下 agent 没有删除权限，清理由平台做，本地与 web 两条路行为一致。
+    source_type 缺省时按入参推断（issue_id→issue、repo_id→repo、book_id→book、都无→import）。
+    issue 课副作用：issue → learning。repo/book/import 课不做联动（没有对应的学习状态机）。
+
+    replace=True（覆盖重生成）：仅 issue 课支持，清掉该 issue 的旧课程记录（连 quiz）
+    **和旧课程目录 courses/{旧id}/**——SDK 模式下 agent 没有删除权限，清理由平台做，
+    本地与 web 两条路行为一致。repo/book 课想重来就另起新课（同源多课并存）。
     """
+    source = req.source_type or ""
+    if source not in ("issue", "repo", "book", "import"):
+        source = ("issue" if req.issue_id else "repo" if req.repo_id
+                  else "book" if req.book_id else "import")
+    if not req.lessons:
+        raise HTTPException(400, "lessons 不能为空")
+    repo_id: int | None = req.repo_id
+    issue_id: int | None = req.issue_id
     with SessionLocal() as session:
-        issue = session.get(Issue, req.issue_id)
-        if issue is None:
-            raise HTTPException(404, "issue 不存在")
+        if source == "issue":
+            if req.issue_id is None:
+                raise HTTPException(400, "issue 课必须带 issue_id")
+            issue = session.get(Issue, req.issue_id)
+            if issue is None:
+                raise HTTPException(404, "issue 不存在")
+            issue_id = issue.id
+            repo_id = issue.repo_id
+        elif source == "repo":
+            if req.repo_id is None:
+                raise HTTPException(400, "项目课必须带 repo_id")
+            repo = session.get(Repo, req.repo_id)
+            if repo is None:
+                raise HTTPException(404, "项目不存在")
+        elif source == "book" and req.book_id:
+            if session.get(Book, req.book_id) is None:
+                raise HTTPException(404, "教材不存在")
         old_ids: list[int] = []
-        if req.replace:
+        if req.replace and source == "issue" and issue_id is not None:
             old_ids = session.scalars(
-                select(Course.id).where(Course.issue_id == req.issue_id)
+                select(Course.id).where(Course.issue_id == issue_id)
             ).all()
             if old_ids:
                 session.execute(delete(QuizResult).where(QuizResult.course_id.in_(old_ids)))
                 session.execute(delete(Course).where(Course.id.in_(old_ids)))
-        if not req.lessons:
-            raise HTTPException(400, "lessons 不能为空")
         course = Course(
             user_id=1,
-            repo_id=issue.repo_id,
-            issue_id=issue.id,
+            source_type=source,
+            repo_id=repo_id,
+            issue_id=issue_id,
+            book_id=req.book_id or 0,
             title=req.title,
             lessons=req.lessons,
             status="learning",
         )
         session.add(course)
-        issue.learning_status = "learning"
+        if source == "issue" and issue_id is not None:
+            issue = session.get(Issue, issue_id)
+            if issue is not None:
+                issue.learning_status = "learning"
         session.commit()
     for old_id in old_ids:  # DB 已提交，目录清理失败只留孤儿文件、不影响新课
         shutil.rmtree(course_publish.course_dir_for(old_id), ignore_errors=True)
@@ -1266,3 +1416,248 @@ def create_quiz_result(req: QuizResultCreate):
                 issue.learning_status = "done"
         session.commit()
         return {"ok": True, "course_status": course.status}
+
+
+# ---------- 教材（books）与教程导入 ----------
+
+MAX_BOOK_BYTES = 200 * 1024 * 1024  # 教材 PDF 上限 200MB（几百页的影印教材够放）
+MAX_IMPORT_BYTES = 100 * 1024 * 1024  # 教程包上限 100MB
+
+
+def _book_view(book: Book, with_outline: bool = False) -> dict:
+    view = {
+        "id": book.id,
+        "title": book.title,
+        "filename": book.filename,
+        "pages": book.pages,
+        "status": book.status,
+        "note": book.note,
+        "stats": book.stats or {},
+        "created_at": book.created_at.isoformat() if book.created_at else None,
+    }
+    if with_outline:
+        view["outline"] = book.outline or {}
+    else:
+        view["chapters"] = len((book.outline or {}).get("chapters", []))
+    return view
+
+
+@router.post("/books")
+async def upload_book(file: UploadFile = File(...), title: str = Form("")):
+    """上传教材 PDF：落盘 + 建记录 + 后台解析任务（抽文本/扫描页视觉转录/归纳大纲）。"""
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "只接受 .pdf 文件")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "空文件")
+    if len(data) > MAX_BOOK_BYTES:
+        raise HTTPException(413, f"文件超过 {MAX_BOOK_BYTES // 1024 // 1024}MB 上限")
+    if not get_settings().llm_configured:
+        raise HTTPException(400, "LLM 未配置（解析大纲与扫描页转录都依赖它）")
+    safe_title = (title or "").strip()[:200]
+    with SessionLocal() as session:
+        book = Book(title=safe_title, filename=file.filename[:500], status="extracting")
+        session.add(book)
+        session.commit()
+        book_id = book.id
+    target_dir = book_dir(book_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "book.pdf").write_bytes(data)
+
+    async def _run(task_id: str, progress, log):
+        return await extract_pipeline(book_id, task_id, progress, log)
+
+    task_id = manager.submit("book_extract", _run, payload={"book_id": book_id, "filename": book.filename})
+    return {"book_id": book_id, "task_id": task_id, "status": book.status}
+
+
+@router.get("/books")
+def list_books():
+    with SessionLocal() as session:
+        books = session.scalars(select(Book).order_by(Book.created_at.desc())).all()
+        return {"books": [_book_view(b) for b in books]}
+
+
+@router.get("/books/{book_id}")
+def get_book(book_id: int):
+    with SessionLocal() as session:
+        book = session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(404, "教材不存在")
+        return _book_view(book, with_outline=True)
+
+
+@router.delete("/books/{book_id}")
+def delete_book(book_id: int):
+    """删一本教材（记录 + PDF/文本文件）。已生成的课程不受影响，只丢书名回显。"""
+    with SessionLocal() as session:
+        book = session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(404, "教材不存在")
+        session.delete(book)
+        session.commit()
+    shutil.rmtree(book_dir(book_id), ignore_errors=True)
+    return {"ok": True}
+
+
+class BookSeriesRequest(BaseModel):
+    chapter_nos: list[int]  # 要生成章节课的章号（大纲里的 no）
+
+
+@router.post("/books/{book_id}/series")
+def create_book_series(book_id: int, req: BookSeriesRequest):
+    """章节系列课：对选中章逐章跑 /tech-book（单章模式），一章一门课，串行不问询。"""
+    chapter_nos = sorted({n for n in req.chapter_nos if n > 0})
+    if not chapter_nos:
+        raise HTTPException(400, "chapter_nos 不能为空")
+    with SessionLocal() as session:
+        book = session.get(Book, book_id)
+        if book is None:
+            raise HTTPException(404, "教材不存在")
+        if book.status != "ready":
+            raise HTTPException(409, f"教材尚未解析完成（{book.status}），先等解析任务成功")
+        known = {c.get("no") for c in (book.outline or {}).get("chapters", [])}
+        unknown = [n for n in chapter_nos if n not in known]
+        if unknown:
+            raise HTTPException(400, f"章号 {unknown} 不在大纲里（共 {len(known)} 章）")
+
+    async def _run(task_id: str, progress, log):
+        return await series_pipeline(book_id, chapter_nos, task_id, progress, log)
+
+    task_id = manager.submit("book_series", _run, payload={"book_id": book_id, "chapter_nos": chapter_nos})
+    return {"task_id": task_id}
+
+
+_QUIZ_SPEC_RE = re.compile(r'<script[^>]+id="quiz-spec"[^>]*>(\{.*?\})</script>', re.S)
+
+
+def _parse_lesson_html(html: str, fallback_id: str) -> tuple[str, int]:
+    """从课件 HTML 提取 (lesson_id, 题数)：优先 quiz-spec 内嵌的 lesson_id，回退文件名。
+
+    导入的多是发布副本（课件已改中文名），文件名当 lesson_id 会对不上 quiz 回传——
+    quiz-spec 里存着生成时的原始 lesson_id，以它为准。
+    """
+    m = _QUIZ_SPEC_RE.search(html)
+    if m:
+        try:
+            spec = json.loads(m.group(1))
+            questions = spec.get("questions") or []
+            if isinstance(questions, list):
+                return str(spec.get("lesson_id") or fallback_id), len(questions)
+        except (ValueError, TypeError):
+            pass
+    return fallback_id, 0
+
+
+def _rewrite_course_ids(html: str, new_id: int) -> str:
+    """导入课的页面里写死了生成时的旧 course_id——统一改写成新 id（进度才能对上）。
+
+    顺带剥掉发布副本注入的 CELESTIAL_PUBLISHED 标记（本地这份要正常回传 quiz）。
+    """
+    html = re.sub(r"window\.COURSE_ID\s*=\s*\d+", f"window.COURSE_ID = {new_id}", html)
+    html = re.sub(r'("course_id"\s*:\s*)\d+', rf"\g<1>{new_id}", html)
+    html = re.sub(r"<script>\s*window\.CELESTIAL_PUBLISHED\s*=\s*true;?\s*</script>\s*", "", html)
+    return html
+
+
+def _extract_zip(zf: zipfile.ZipFile, dest: Path) -> None:
+    """逐成员解压：防 zip-slip 越界；未打 UTF-8 旗标的文件名按 cp437→gbk 重解码
+    （Windows「发送到压缩文件夹」打出来的中文文件名是 GBK，直接 extractall 会乱码）。"""
+    dest = dest.resolve()
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        name = info.filename
+        if not info.flag_bits & 0x800:
+            try:
+                name = name.encode("cp437").decode("gbk")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                pass
+        target = (dest / name).resolve()
+        if not target.is_relative_to(dest):
+            raise HTTPException(400, f"压缩包含越界路径：{info.filename}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with zf.open(info) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out)
+
+
+@router.post("/courses/import")
+async def import_course(file: UploadFile = File(...), title: str = Form("")):
+    """上传一份已生成好的教程压缩包，解压注册进课程列表（source_type=import）。
+
+    接受 /tech 系技能的产物结构（index.html + NN-*.html + assets/…），也接受其发布副本
+    （00-课程目录.html + 中文课标题文件名）。课件里写死的旧 course_id 会被改写成新 id；
+    缺 assets/quiz.js 时补平台默认件（发布副本通常带，手工打包可能没有）。
+    """
+    if not file.filename or not file.filename.lower().endswith(".zip"):
+        raise HTTPException(400, "只接受 .zip 压缩包")
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "空文件")
+    if len(data) > MAX_IMPORT_BYTES:
+        raise HTTPException(413, f"文件超过 {MAX_IMPORT_BYTES // 1024 // 1024}MB 上限")
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as e:
+        raise HTTPException(400, f"不是有效的 zip：{e}") from e
+    with tempfile.TemporaryDirectory(prefix="course-import-") as tmp:
+        tmp_dir = Path(tmp)
+        _extract_zip(zf, tmp_dir)
+        # 根目录：zip 里若只有一层目录且课件都在其中，下钻一层
+        root = tmp_dir
+        entries = [p for p in root.iterdir() if not p.name.startswith(("__MACOSX", "."))]
+        if len(entries) == 1 and entries[0].is_dir():
+            root = entries[0]
+        htmls = sorted((p for p in root.glob("*.html") if p.is_file()), key=lambda p: p.name)
+        if not htmls:
+            raise HTTPException(400, "压缩包顶层没有 .html 课件（应为 index.html + NN-*.html 结构）")
+        # 课程首页：index.html 优先，其次 00-*.html（发布副本命名）
+        index_file = next(
+            (p for p in htmls if p.name.lower() == "index.html"),
+            next((p for p in htmls if re.match(r"^0\d", p.name)), htmls[0]),
+        )
+        lesson_files = [p for p in htmls if p is not index_file]
+        lessons: list[dict] = []
+        index_title = ""
+        for p in [index_file, *lesson_files]:
+            html = p.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+            page_title = re.sub(r"\s+", " ", m.group(1)).strip() if m else p.stem
+            if p is index_file:
+                index_title = page_title
+                continue
+            lesson_id, quiz_count = _parse_lesson_html(html, p.stem)
+            lessons.append({
+                "lesson_id": lesson_id[:64],
+                "title": page_title[:200] or p.stem,
+                "file": p.name,
+                "quiz_count": quiz_count,
+            })
+        if not lessons:
+            raise HTTPException(400, "压缩包里除首页外没有课件页，构不成一门课")
+        course_title = (title or "").strip() or index_title or "导入的课程"
+        with SessionLocal() as session:
+            course = Course(
+                user_id=1, source_type="import",
+                title=course_title[:500], lessons=lessons, status="learning",
+            )
+            session.add(course)
+            session.commit()
+            course_id = course.id
+        # 先注册拿 id，再改写 course_id 落盘到正式目录
+        course_dir = course_publish.course_dir_for(course_id)
+        shutil.rmtree(course_dir, ignore_errors=True)
+        shutil.copytree(root, course_dir)
+        for p in course_dir.glob("*.html"):
+            p.write_text(_rewrite_course_ids(
+                p.read_text(encoding="utf-8", errors="replace"), course_id
+            ), encoding="utf-8")
+        assets = course_dir / "assets"
+        if not (assets / "quiz.js").is_file():
+            default = skill_runner.PROJECT_SKILLS_DIR / "tech" / "assets" / "quiz.js"
+            if default.is_file():
+                assets.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(default, assets / "quiz.js")
+    with SessionLocal() as session:
+        course = session.get(Course, course_id)
+        return _course_view(session, course, full=True)

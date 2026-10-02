@@ -420,15 +420,18 @@
           </template>
 
           <el-alert type="info" :closable="false" show-icon class="task-alert"
-            title="在 Issue 榜点「生成课程」拿到 /tech 命令 → 在 Claude Code 中运行 → 课程出现在这里；每节 quiz 即时反馈并回传，全部提交后 issue 自动标记已完成" />
+            title="课程四种来源：Issue 榜「生成课程」（/tech）· 项目课（/tech-repo）· 教材课（上传 PDF → /tech-book）· 导入教程包；每节 quiz 即时反馈并回传，全部提交后自动标记已完成" />
 
           <div class="toolbar">
             <el-button :loading="coursesLoading" @click="loadCourses">刷新课程</el-button>
-            <span class="picked-hint">课程由 /tech 一次性生成，静态托管于 /courses</span>
+            <el-button type="primary" @click="openRepoCourseDialog">生成项目课程</el-button>
+            <el-button type="primary" @click="openBooksDialog">教材书架</el-button>
+            <el-button @click="openImportDialog">导入教程包</el-button>
+            <span class="picked-hint">课程由技能一次性生成，静态托管于 /courses</span>
           </div>
 
           <el-empty v-if="!coursesLoading && courses.length === 0"
-            description="还没有课程——去 Issue 榜挑一个高分 issue，点「生成课程」开始" />
+            description="还没有课程——从 Issue / 项目 / PDF 教材生成，或直接导入教程包" />
 
           <el-row :gutter="14">
             <el-col v-for="c in courses" :key="c.id" :span="8" class="course-col">
@@ -440,7 +443,18 @@
                   </el-tag>
                 </div>
                 <div class="repo-desc course-meta">
-                  <span class="repo-attr">{{ c.repo }} #{{ c.issue_number }}</span>{{ c.issue_title }}
+                  <template v-if="c.source_type === 'repo'">
+                    <span class="repo-attr">📁 项目课</span>{{ c.repo }}
+                  </template>
+                  <template v-else-if="c.source_type === 'book'">
+                    <span class="repo-attr">📖 教材课</span>{{ c.book_title || '（教材已删）' }}
+                  </template>
+                  <template v-else-if="c.source_type === 'import'">
+                    <span class="repo-attr">📦 导入</span>{{ (c.created_at || '').slice(0, 10) }} 上传
+                  </template>
+                  <template v-else>
+                    <span class="repo-attr">{{ c.repo }} #{{ c.issue_number }}</span>{{ c.issue_title }}
+                  </template>
                 </div>
                 <div class="course-lessons">
                   <div v-for="l in c.lessons" :key="l.lesson_id" class="lesson-row">
@@ -467,7 +481,7 @@
           </template>
 
           <el-alert type="info" :closable="false" show-icon class="task-alert"
-            title="无头调用 Claude Code 技能（claude -p）：技能来自项目 .claude/skills/ 与 ~/.claude/skills/，每次调用现读文件——新增或修改 SKILL.md 即时生效，无需重启本平台" />
+            title="技能来自项目 .claude/skills/ 与 ~/.claude/skills/，每次调用现读文件——新增或修改 SKILL.md 即时生效，无需重启本平台" />
 
           <div class="toolbar">
             <el-button :loading="skillsLoading" @click="loadSkills">刷新技能</el-button>
@@ -891,6 +905,16 @@
             <el-option v-for="i in skillIssueOptions" :key="i.id" :value="i.id"
               :label="`#${i.id} · ${i.repo}#${i.number} · ${i.title.slice(0, 30)}`" />
           </el-select>
+          <el-select v-else-if="def.type === 'repo'" v-model="skillForm[key]" filterable :loading="skillRepoLoading"
+            placeholder="搜索选择项目（按总分取前 50）" @change="onRepoParamChange">
+            <el-option v-for="r in skillRepoOptions" :key="r.id" :value="r.id"
+              :label="`#${r.id} · ${r.full_name} · ${(r.zh_desc || r.description || '').slice(0, 24)}`" />
+          </el-select>
+          <el-select v-else-if="def.type === 'book'" v-model="skillForm[key]" filterable :loading="skillBookLoading"
+            placeholder="选择教材（解析完成的）" @change="onBookParamChange">
+            <el-option v-for="b in skillBookOptions" :key="b.id" :value="b.id"
+              :label="`《${b.title || b.filename}》· ${b.pages} 页 · ${b.chapters} 章`" />
+          </el-select>
           <el-radio-group v-else-if="def.type === 'select'" v-model="skillForm[key]" class="skill-radios">
             <el-radio v-for="o in def.options" :key="o.value" :value="o.value">{{ o.label }}</el-radio>
           </el-radio-group>
@@ -899,6 +923,16 @@
         <el-alert v-if="existingCourses.length" type="warning" :closable="false" class="skill-course-warn">
           <template #title>
             该 issue 已有 {{ existingCourses.length }} 门课程：《{{ existingCourses.map((c) => c.title).join('》《') }}》
+          </template>
+        </el-alert>
+        <el-alert v-else-if="existingRepoCourses.length" type="warning" :closable="false" class="skill-course-warn">
+          <template #title>
+            该项目已有 {{ existingRepoCourses.length }} 门项目课：《{{ existingRepoCourses.map((c) => c.title).join('》《') }}》，将另起新课
+          </template>
+        </el-alert>
+        <el-alert v-else-if="existingBookCourses.length" type="warning" :closable="false" class="skill-course-warn">
+          <template #title>
+            该教材已有 {{ existingBookCourses.length }} 门教程：《{{ existingBookCourses.map((c) => c.title).join('》《') }}》，将另起新课
           </template>
         </el-alert>
       </template>
@@ -916,6 +950,98 @@
           @click="copySkillCommand">复制命令</el-button>
         <el-button v-else type="primary" :loading="invoking" :disabled="!skillFormReady"
           @click="runSkill">执行</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 生成项目课程：选一个已精析项目 → /tech-repo（项目导览/架构走读/上手路径三章） -->
+    <el-dialog v-model="repoCourseVisible" title="生成项目课程" width="560px">
+      <p class="muted">挑一个项目生成整仓课程：项目导览 → 架构与核心模块走读 → 上手路径。
+        建议选已精析的项目（README 与评分已就绪，生成质量更好）。</p>
+      <el-select v-model="repoCoursePick" filterable :loading="repoCourseLoading"
+        placeholder="搜索选择项目（按总分取前 50，未精析也可选）" style="width: 100%">
+        <el-option v-for="r in repoOptions" :key="r.id" :value="r.id"
+          :label="`#${r.id} · ${r.full_name}${r.analyzed ? '' : ' · 未精析'}`">
+          <span class="repo-name">{{ r.full_name }}</span>
+          <span class="repo-desc" style="margin-left: 8px">{{ (r.zh_desc || r.description || '').slice(0, 30) }}</span>
+        </el-option>
+      </el-select>
+      <template #footer>
+        <el-button @click="repoCourseVisible = false">取消</el-button>
+        <el-button type="primary" :loading="repoCourseRunning" :disabled="!repoCoursePick"
+          @click="runRepoCourse">生成课程</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 教材书架：上传 PDF 解析（文本层直抽 + 扫描页视觉转录 + 大纲）→ 整本精讲 / 章节系列 -->
+    <el-dialog v-model="booksVisible" title="教材书架" width="720px" top="6vh">
+      <div class="book-upload">
+        <input type="file" accept=".pdf" class="file-input" @change="onBookFileChange" />
+        <el-input v-model="bookUploadTitle" placeholder="书名（可空，解析时自动从封面推断）"
+          style="flex: 1" @keyup.enter="submitBook" />
+        <el-button type="primary" :loading="bookUploading" :disabled="!bookUploadFile"
+          @click="submitBook">上传并解析</el-button>
+      </div>
+      <p class="muted">解析走后台任务（大书扫描页多时要一阵子，看右下角任务卡）；完成后可生成
+        「整本精讲」（挑重点章一门课）或「章节系列」（选中章逐章各生成一门课）。</p>
+      <el-empty v-if="!booksLoading && books.length === 0" description="还没有上传教材" />
+      <div v-for="b in books" :key="b.id" class="book-row">
+        <div class="book-info">
+          <span class="book-title">《{{ b.title || b.filename }}》</span>
+          <span class="muted">{{ b.pages }} 页 · {{ b.chapters }} 章
+            <template v-if="b.stats?.chars">· {{ Math.round(b.stats.chars / 1000) }}k 字</template>
+            <template v-if="b.stats?.vision_pages">· 视觉转录 {{ b.stats.vision_pages }} 页</template>
+          </span>
+        </div>
+        <el-tag :type="b.status === 'ready' ? 'success' : b.status === 'failed' ? 'danger' : 'primary'"
+          size="small" class="book-status">
+          {{ b.status === 'ready' ? '✓ 可生成' : b.status === 'failed' ? '✕ 解析失败' : '⟳ 解析中' }}
+        </el-tag>
+        <div class="book-actions">
+          <template v-if="b.status === 'ready'">
+            <el-button link type="primary" size="small"
+              @click="runBookCourse(b)">整本精讲</el-button>
+            <el-button link type="primary" size="small"
+              @click="openSeriesDialog(b)">章节系列</el-button>
+          </template>
+          <el-button v-if="b.status !== 'ready'" link size="small"
+            @click="openBookNote(b)">{{ b.status === 'failed' ? '看原因' : '详情' }}</el-button>
+          <el-button link type="danger" size="small" @click="removeBook(b)">删除</el-button>
+        </div>
+        <div v-if="b.status === 'failed' && b.note" class="book-note">{{ b.note }}</div>
+      </div>
+    </el-dialog>
+
+    <!-- 章节系列课：勾选要生成的章（一章一门课，后台串行跑） -->
+    <el-dialog v-model="seriesVisible" :title="`章节系列课 ·《${seriesBook?.title || ''}》`" width="560px">
+      <p class="muted">一章一门课，串行生成（章多耗时长，进度看任务卡；可只勾重点章）。</p>
+      <div v-loading="seriesLoading" class="series-list">
+        <el-checkbox-group v-model="seriesChecked">
+          <el-checkbox v-for="ch in seriesChapters" :key="ch.no" :value="ch.no" class="series-check">
+            第{{ ch.no }}章 {{ ch.title }}
+            <span class="muted">（p.{{ ch.start }}-{{ ch.end }}）</span>
+          </el-checkbox>
+        </el-checkbox-group>
+      </div>
+      <template #footer>
+        <el-button @click="seriesVisible = false">取消</el-button>
+        <el-button type="primary" :loading="seriesStarting" :disabled="!seriesChecked.length"
+          @click="startSeries">生成 {{ seriesChecked.length }} 门章节课</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 导入教程包：已生成好的课程 zip 解压注册（旧 course_id 由平台改写，quiz 进度正常对上） -->
+    <el-dialog v-model="importVisible" title="导入教程包" width="520px">
+      <p class="muted">上传一份已生成好的教程压缩包（/tech 系技能产物或其发布副本 zip），
+        解压注册后显示在课程列表。</p>
+      <div class="book-upload">
+        <input type="file" accept=".zip" class="file-input" @change="onImportFileChange" />
+        <el-input v-model="importTitle" placeholder="课程标题（可空，取压缩包首页标题）"
+          style="flex: 1" @keyup.enter="submitImport" />
+      </div>
+      <template #footer>
+        <el-button @click="importVisible = false">取消</el-button>
+        <el-button type="primary" :loading="importing" :disabled="!importFile"
+          @click="submitImport">导入</el-button>
       </template>
     </el-dialog>
 
@@ -1026,11 +1152,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  BASE, adoptScaffold, answerTask, confirmScaffoldItems, createScaffoldRequest, deleteIndustry,
-  getConfig, getCourses, getIndustry, getIndustries, getIssueRepos, getIssues, getRepo, getRepos,
-  getReport, getScaffold, getScaffolds, getSkills, getTags, getTask, getTasks, invokeSkill,
-  postAnalyze, postAutoTag, postContribute, postIndustryParse, postIndustryRuns, postRefresh,
-  postTranslate, rematchScaffold, runAgent, splitScaffold, submitScaffoldSelection,
+  BASE, adoptScaffold, answerTask, confirmScaffoldItems, createBookSeries, createScaffoldRequest,
+  deleteBook, deleteIndustry, getConfig, getCourses, getBook, getBooks, getIndustry, getIndustries,
+  getIssueRepos, getIssues, getRepo, getRepos, getReport, getScaffold, getScaffolds, getSkills,
+  getTags, getTask, getTasks, importCourse, invokeSkill, postAnalyze, postAutoTag, postContribute,
+  postIndustryParse, postIndustryRuns, postRefresh, postTranslate, rematchScaffold, runAgent,
+  splitScaffold, submitScaffoldSelection, uploadBook,
 } from './api'
 
 const activeTab = ref('repos')
@@ -1109,8 +1236,36 @@ const skillForm = ref({})
 const skillIssueOptions = ref([])    // issue 下拉数据
 const skillIssueLoading = ref(false)
 const existingCourses = ref([])      // 所选 issue 的已有课程（决定 replace 选项是否出现）
+const skillRepoOptions = ref([])     // repo 下拉数据（/tech-repo 一类）
+const skillRepoLoading = ref(false)
+const existingRepoCourses = ref([])  // 所选项目的已有项目课
+const skillBookOptions = ref([])     // book 下拉数据（/tech-book 一类）
+const skillBookLoading = ref(false)
+const existingBookCourses = ref([])  // 所选教材的已有教程
 const copiedCmd = ref('')            // 剪贴板被拒时兜底亮出命令
 const invoking = ref(false)
+// 学习模块化：项目课 / 教材书架 / 导入教程包
+const repoCourseVisible = ref(false)
+const repoCourseLoading = ref(false)
+const repoOptions = ref([])
+const repoCoursePick = ref(null)
+const repoCourseRunning = ref(false)
+const booksVisible = ref(false)
+const books = ref([])
+const booksLoading = ref(false)
+const bookUploadFile = ref(null)
+const bookUploadTitle = ref('')
+const bookUploading = ref(false)
+const seriesVisible = ref(false)
+const seriesLoading = ref(false)
+const seriesBook = ref(null)
+const seriesChapters = ref([])
+const seriesChecked = ref([])
+const seriesStarting = ref(false)
+const importVisible = ref(false)
+const importFile = ref(null)
+const importTitle = ref('')
+const importing = ref(false)
 const agentPrompt = ref('')
 const agentRunning = ref(false)
 const agentInput = ref(null)
@@ -1207,6 +1362,8 @@ const TASK_TYPE_LABELS = {
   tagging: '项目自动打标',
   analyze: '批量精析',
   translate: '中文简介翻译',
+  book_extract: '教材解析',
+  book_series: '教材系列课',
   scaffold_match: '脚手架框架匹配',
   scaffold_select: '脚手架条目选型',
   scaffold_build: '脚手架生成',
@@ -1220,6 +1377,8 @@ function panelLabel(t) {
   if (t.type === 'skill') return `/${t.payload?.skill || '技能'} ${t.payload?.args || ''}`.trim()
   if (t.type === 'industry') return `🧭 行业分析 · ${t.payload?.args?.[0] || ''}`
   if (t.type === 'analyze') return `🔬 批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
+  if (t.type === 'book_extract') return `📖 教材解析 #${t.payload?.book_id ?? '?'}`
+  if (t.type === 'book_series') return `📚 教材系列课 · ${t.payload?.chapter_nos?.length || '?'} 章`
   if (t.type === 'scaffold_match') return `🏗 需求 #${t.payload?.request_id ?? '?'} 框架匹配`
   if (t.type === 'scaffold_select') return `🏗 需求 #${t.payload?.request_id ?? '?'} 条目选型`
   if (t.type === 'scaffold_build') return `🏗 需求 #${t.payload?.request_id ?? '?'} 生成脚手架`
@@ -2027,6 +2186,158 @@ function openCourse(id, hint) {
   if (hint) ElMessage.info(hint)
 }
 
+// ---------- 学习模块化：项目课 / 教材书架 / 导入教程包 ----------
+
+async function loadRepoOptions() {
+  repoCourseLoading.value = true
+  try {
+    repoOptions.value = (await getRepos({ sort: 'total', limit: 50 })).repos
+  } catch (e) {
+    ElMessage.error(`加载项目列表失败：${e.message}`)
+  } finally {
+    repoCourseLoading.value = false
+  }
+}
+
+function openRepoCourseDialog() {
+  repoCourseVisible.value = true
+  if (!repoOptions.value.length) loadRepoOptions()
+}
+
+async function runRepoCourse() {
+  repoCourseRunning.value = true
+  try {
+    const { task_id: taskId } = await invokeSkill('tech-repo', String(repoCoursePick.value))
+    ElMessage.success('项目课生成已提交，进度见右下角任务中心')
+    repoCourseVisible.value = false
+    focusTask(taskId, loadCourses)
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    repoCourseRunning.value = false
+  }
+}
+
+async function loadBooks() {
+  booksLoading.value = true
+  try {
+    books.value = (await getBooks()).books
+  } catch (e) {
+    ElMessage.error(`加载教材失败：${e.message}`)
+  } finally {
+    booksLoading.value = false
+  }
+}
+
+function openBooksDialog() {
+  booksVisible.value = true
+  loadBooks()
+}
+
+function onBookFileChange(e) {
+  bookUploadFile.value = e.target.files?.[0] || null
+}
+
+async function submitBook() {
+  if (!bookUploadFile.value) return
+  bookUploading.value = true
+  try {
+    const { task_id: taskId } = await uploadBook(bookUploadFile.value, bookUploadTitle.value)
+    ElMessage.success('教材已上传，解析任务已提交（见右下角任务卡）')
+    bookUploadFile.value = null
+    bookUploadTitle.value = ''
+    focusTask(taskId, loadBooks)
+    loadBooks()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    bookUploading.value = false
+  }
+}
+
+/** 整本精讲：直接调 /tech-book（技能自己按大纲挑重点章）。 */
+function runBookCourse(book) {
+  invokeSkill('tech-book', String(book.id)).then(({ task_id: taskId }) => {
+    ElMessage.success(`《${book.title || book.filename}》精讲课已提交，进度见右下角任务中心`)
+    booksVisible.value = false
+    focusTask(taskId, loadCourses)
+  }).catch((e) => ElMessage.error(e.message))
+}
+
+/** 章节系列：拉完整大纲勾选章，一章一门课的串行批量任务。 */
+async function openSeriesDialog(book) {
+  seriesBook.value = book
+  seriesChapters.value = []
+  seriesChecked.value = []
+  seriesVisible.value = true
+  seriesLoading.value = true
+  try {
+    seriesChapters.value = (await getBook(book.id)).outline?.chapters || []
+  } catch (e) {
+    ElMessage.error(`加载大纲失败：${e.message}`)
+  } finally {
+    seriesLoading.value = false
+  }
+}
+
+async function startSeries() {
+  seriesStarting.value = true
+  try {
+    const { task_id: taskId } = await createBookSeries(seriesBook.value.id, [...seriesChecked.value].sort((a, b) => a - b))
+    ElMessage.success(`章节系列课已提交（${seriesChecked.value.length} 门），串行生成中，看任务卡`)
+    seriesVisible.value = false
+    booksVisible.value = false
+    focusTask(taskId, () => { loadCourses(); loadBooks() })
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    seriesStarting.value = false
+  }
+}
+
+function openBookNote(book) {
+  ElMessageBox.alert(book.note || '解析中，等任务完成后再试。', `《${book.title || book.filename}》`)
+}
+
+async function removeBook(book) {
+  try {
+    await ElMessageBox.confirm(
+      `删除《${book.title || book.filename}》（PDF 与解析文本一并删除，已生成的课程保留）`, '删除教材',
+      { type: 'warning' })
+  } catch { return }
+  try {
+    await deleteBook(book.id)
+    loadBooks()
+  } catch (e) {
+    ElMessage.error(e.message)
+  }
+}
+
+function openImportDialog() {
+  importVisible.value = true
+}
+
+function onImportFileChange(e) {
+  importFile.value = e.target.files?.[0] || null
+}
+
+async function submitImport() {
+  if (!importFile.value) return
+  importing.value = true
+  try {
+    const course = await importCourse(importFile.value, importTitle.value)
+    ElMessage.success(`已导入《${course.title}》（${course.total_lessons} 课），出现在课程列表`)
+    importVisible.value = false
+    importFile.value = null
+    importTitle.value = ''
+    if (activeTab.value === 'learning') loadCourses()
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    importing.value = false
+  }
+}
+
 // ---------- AI 命令栏 ----------
 function prefillAgent(text) {
   agentPrompt.value = text
@@ -2082,12 +2393,17 @@ function openSkill(s) {
   skillArgs.value = ''
   copiedCmd.value = ''
   existingCourses.value = []
+  existingRepoCourses.value = []
+  existingBookCourses.value = []
   skillForm.value = {}
   // 单选参数默认取第一项（/tech 的「另起新课」是更安全的默认）
   for (const [key, def] of Object.entries(s.arguments || {})) {
     if (def.type === 'select') skillForm.value[key] = def.options?.[0]?.value ?? ''
   }
-  if ([...Object.values(s.arguments || {})].some((d) => d.type === 'issue')) loadIssueOptions()
+  const defs = Object.values(s.arguments || {})
+  if (defs.some((d) => d.type === 'issue')) loadIssueOptions()
+  if (defs.some((d) => d.type === 'repo')) loadSkillRepoOptions()
+  if (defs.some((d) => d.type === 'book')) loadSkillBookOptions()
   skillDialog.value = true
 }
 
@@ -2095,8 +2411,11 @@ function openSkill(s) {
 const hasSkillForm = computed(() => Object.keys(currentSkill.value?.arguments || {}).length > 0)
 
 function paramVisible(def) {
-  // 目前唯一的条件：所选 issue 已有课程（/tech 的覆盖选择）。新增条件在这里扩展
+  // 条件词表（与 skill_runner._parse_arguments 注释同步）：
+  // 所选 issue/项目/教材已有课程时才显示对应字段（/tech 的覆盖选择等）
   if (def.visible_if === 'existing_course') return existingCourses.value.length > 0
+  if (def.visible_if === 'existing_repo_course') return existingRepoCourses.value.length > 0
+  if (def.visible_if === 'existing_book_course') return existingBookCourses.value.length > 0
   return true
 }
 
@@ -2136,11 +2455,61 @@ async function onIssueParamChange() {
       existingCourses.value = (await getCourses()).courses.filter((c) => c.issue_id === id)
     } catch { /* 查不到就当作没有旧课：条件字段不显示 */ }
   }
-  if (!existingCourses.value.length) {
-    // 条件字段隐藏时清掉值，避免看不见的选择泄漏进 args（先选有旧课的 issue 再换没旧的）
-    for (const [key, def] of Object.entries(currentSkill.value?.arguments || {})) {
-      if (def.visible_if) skillForm.value[key] = def.type === 'select' ? (def.options?.[0]?.value ?? '') : ''
-    }
+  _resetConditionalFields(existingCourses.value.length)
+}
+
+async function loadSkillRepoOptions() {
+  skillRepoLoading.value = true
+  try {
+    skillRepoOptions.value = (await getRepos({ sort: 'total', limit: 50 })).repos
+  } catch (e) {
+    ElMessage.error(`加载项目列表失败：${e.message}`)
+  } finally {
+    skillRepoLoading.value = false
+  }
+}
+
+async function onRepoParamChange() {
+  existingRepoCourses.value = []
+  const id = Number(skillForm.value.repo)
+  if (id) {
+    try {
+      existingRepoCourses.value = (await getCourses()).courses
+        .filter((c) => c.source_type === 'repo' && c.repo_id === id)
+    } catch { /* 同上：查不到当作没有 */ }
+  }
+  _resetConditionalFields(existingRepoCourses.value.length)
+}
+
+async function loadSkillBookOptions() {
+  skillBookLoading.value = true
+  try {
+    skillBookOptions.value = (await getBooks()).books.filter((b) => b.status === 'ready')
+  } catch (e) {
+    ElMessage.error(`加载教材失败：${e.message}`)
+  } finally {
+    skillBookLoading.value = false
+  }
+}
+
+async function onBookParamChange() {
+  existingBookCourses.value = []
+  const id = Number(skillForm.value.book)
+  if (id) {
+    try {
+      existingBookCourses.value = (await getCourses()).courses
+        .filter((c) => c.source_type === 'book' && c.book_id === id)
+    } catch { /* 同上 */ }
+  }
+  _resetConditionalFields(existingBookCourses.value.length)
+}
+
+/** 条件字段隐藏时清掉值，避免看不见的选择泄漏进 args（先选有旧课的再换没旧的）。
+ *  hasExisting=false 表示当前来源没有旧课，所有 visible_if 字段都该收起来。 */
+function _resetConditionalFields(hasExisting) {
+  if (hasExisting) return
+  for (const [key, def] of Object.entries(currentSkill.value?.arguments || {})) {
+    if (def.visible_if) skillForm.value[key] = def.type === 'select' ? (def.options?.[0]?.value ?? '') : ''
   }
 }
 
@@ -2960,6 +3329,48 @@ h4::before {
 .skill-radios .el-radio { margin-right: 0; height: auto; white-space: normal; }
 .skill-course-warn { margin-top: 2px; }
 .skill-local-tip { margin-top: 12px; }
+
+/* ---------- 学习模块化：教材书架 / 导入教程包 ---------- */
+
+.book-upload { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.file-input {
+  color: var(--text-mid);
+  font-size: 13px;
+  max-width: 240px;
+}
+.file-input::file-selector-button {
+  background: rgba(111, 211, 242, .12);
+  color: var(--ice);
+  border: 1px solid rgba(111, 211, 242, .45);
+  border-radius: 4px;
+  padding: 5px 12px;
+  margin-right: 10px;
+  cursor: pointer;
+}
+.book-row {
+  border-top: 1px solid var(--line);
+  padding: 10px 2px 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.book-row:first-of-type { border-top: none; }
+.book-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.book-title {
+  font-family: 'Chakra Petch', var(--el-font-family);
+  font-size: 14px;
+  color: var(--text-hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.book-status { flex: none; }
+.book-actions { flex: none; display: flex; gap: 2px; }
+.book-note { flex-basis: 100%; font-size: 12px; color: var(--rose); opacity: .85; }
+.series-list { max-height: 46vh; overflow: auto; margin-top: 6px; }
+.series-check { display: flex; width: 100%; }
+.series-check .muted { font-weight: 400; }
 
 /* ---------- 脚手架详情 ---------- */
 

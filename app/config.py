@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = "glm-4.7"
+    # 视觉模型（扫描版 PDF 逐页转录用）：空 = 回退主模型（不支持图片则转录失败）
+    llm_vision_model: str = "glm-5.3-flash"
 
     # 搜索
     search_provider: str = ""  # bocha | tavily | zai | 空

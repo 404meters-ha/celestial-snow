@@ -40,9 +40,11 @@ def _parse_arguments(raw: str) -> dict:
     """frontmatter 的 `arguments:` 值（单行 JSON）→ 参数表。坏 JSON 静默忽略，退回普通 args 文本框。
 
     词表（前端渲染依据，保持两端同步）：
-      type: "text" 文本框 | "issue" issue 下拉（数据来自 /api/issues）| "select" 单选
+      type: "text" 文本框 | "issue" issue 下拉（/api/issues）| "repo" 项目下拉（/api/repos）|
+            "book" 教材下拉（/api/books）| "select" 单选
       label / placeholder / required
-      visible_if: "existing_course" —— 目前唯一条件：所选 issue 已有课程时才显示（/tech 的覆盖选择）
+      visible_if: "existing_course"（所选 issue 已有课，/tech 的覆盖选择）|
+                  "existing_repo_course"（所选项目已有项目课）| "existing_book_course"（所选教材已有教程）
     参数按声明顺序以空格拼进 args（空值跳过），技能正文照旧用 $ARGUMENTS 接。
     """
     try:

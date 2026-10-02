@@ -24,6 +24,17 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
   （任务类型 `industry`，方向串行跑；种子项目并入各方向候选与报告，项目名本身不打成标签）；报告看 `GET /api/industries`（列表）/ `GET /api/industries/{id}`（含 `overview_md` 与项目分类清单）；
   `DELETE /api/industries/{id}` 删一份报告（只删报告记录，`repos.tags` 是累积知识不动）
 - `GET /api/learning-context/{issue_id}` — 一次取全：issue + 仓库元数据 + README + 贡献报告深读段（深度分析/生成课程用这个）
+- `GET /api/learning-context/repo/{repo_id}` — `/tech-repo` 项目课取材：仓库元数据 + 精析（README 全文）+ 最新贡献报告 + 匹配度 top5 issue
+- `GET /api/learning-context/book/{book_id}` — `/tech-book` 教材课取材：大纲（章 → 页范围 → 逐页文本文件清单）+ 逐页文本目录
+- `POST /api/books`（multipart：`file`=PDF、`title` 可空）— 上传教材 → `book_extract` 后台任务：pypdf 逐页抽文本，扫描页
+  （抽出 <60 字符）渲染 PNG（pypdfium2）送 `LLM_VISION_MODEL`（默认 glm-5.3-flash）视觉转录，再 LLM 归纳学习大纲；
+  逐页文本落 `uploads/books/{id}/text/pNNNN.txt`（文件名即页码；uploads 在 agent READ_ROOTS 内）
+- `GET /api/books`（列表）/ `GET /api/books/{id}`（含 outline）/ `DELETE /api/books/{id}`（删记录与文件，已生成课程保留）
+- `POST /api/books/{id}/series` `{"chapter_nos": [1, 3]}` — 章节系列课：对选中章**逐章**跑 /tech-book（单章模式，参数 `{book_id} 第{N}章`），一章一门课，串行不问询（任务类型 `book_series`）
+- `POST /api/courses` 已多来源化：`source_type` = `issue`|`repo`|`book`|`import` + 对应 `issue_id`/`repo_id`/`book_id`（缺省按入参推断；`replace` 覆盖重生成仅 issue 课支持，repo/book 课另起新课并存）
+- `POST /api/courses/import`（multipart：`file`=zip、`title` 可空）— 导入已生成好的教程包（/tech 产物结构或其发布副本）：
+  解压进 `courses/{新id}/`、lesson_id 取页内 quiz-spec 内嵌值（发布副本中文名文件也对得上）、页面写死的旧 `course_id` 由平台改写成新 id
+  （quiz 进度才能对上）、剥 `CELESTIAL_PUBLISHED` 标记、缺 `assets/quiz.js` 补默认件；zip 中文文件名按 cp437→gbk 重解码
 - `POST /api/courses/{course_id}/publish` — 把 `courses/{id}/` 发布到服务器本地磁盘（`LOCAL_PUBLISH_DIR`，默认 `./published`，平台静态托管在 `/published`），返回 `entry_url` 等清单
   （平台负责分文件夹、用中文课标题重命名课件、改写页面内相对链接；`{"prune": true}` 清掉上一版残留文件；nginx 接管时改 `LOCAL_PUBLISH_BASE_URL`）
 - `GET /api/tasks?limit=N` — 后台任务状态；`GET /api/config` — 配置状态
@@ -43,10 +54,12 @@ GitHub Trending 情报站：抓取热门项目 → 规则 + LLM 双重评分 →
 
 - 结论要能支撑决策：值不值得投入这个项目 / 这个 issue 适不适合用户上手，给出理由与下一步动作。
 - 输出用精炼的结构化 Markdown。
-- 生成课程走 `/tech` 技能（参数 issue_id，可带 `replace` 表示覆盖已有课程不再询问），不要手工绕过它的流程。
+- 生成课程走技能家族，不要手工绕过流程：`/tech`（issue 课）、`/tech-repo`（项目课：导览/架构走读/上手路径）、`/tech-book`（教材课：整本精讲或「第N章」单章模式）。
+  三者模板与 assets 全部复用 `.claude/skills/tech/`，新课程技能不要复制模板。
+- 课程四种来源（`courses.source_type`）：issue / repo / book / import——列表视图与前端卡片按它分支渲染来源行；发布文件夹名也按它分支。
 - 课程有本地与发布目录两份：本地 `localhost:8100/courses/{id}/` 会回传 quiz 进度，发布目录（`/published`）那份是静态副本（可分享、不计进度）。
 - 子路径部署走 `.env` 的 `BASE_PATH`（如 `/celestial-snow`）：后端 `_BasePathStrip` 中间件剥前缀（带/不带前缀都能访问），前端 `vite.config.js` 读同一份 `.env` 定构建 base，`api.js` 的 `BASE` 与课程 quiz.js 的相对回传路径（`../../api/…`）自动跟随；改动后须 `cd frontend && npm run build`。
-- 技能参数表单：SKILL.md frontmatter 可写 `arguments: {单行 JSON}`（type: text/issue/select，`visible_if: "existing_course"` 为目前唯一条件），web 端据此渲染结构化表单，取值按声明顺序空格拼进 args。词表两端同步：`app/services/skill_runner.py::_parse_arguments` 与 `App.vue` 的 paramVisible。
+- 技能参数表单：SKILL.md frontmatter 可写 `arguments: {单行 JSON}`（type: text/issue/repo/book/select；条件 `visible_if`: existing_course / existing_repo_course / existing_book_course），web 端据此渲染结构化表单，取值按声明顺序空格拼进 args。词表两端同步：`app/services/skill_runner.py::_parse_arguments` 与 `App.vue` 的 paramVisible。
 - 列表分页一律服务端 `limit/offset` + 返回 `total`，排序末尾补 `id` tiebreaker（OFFSET 分页要求全序稳定）；`issues.fixed_hint` 是写入时算好的物化列（摄入/LLM 回写各节点经 `scoring.refresh_fixed_hint` 重算），不要回到「取一批再 Python 排序」的老路。
 - 行业/分类标签统一存 `repos.tags`（JSON 数组，只增不减取并集）；新表/新列走 `db._migrate` 的 inspect+ALTER 模式。
 - 标签库（`tags` 表）是 canonical 唯一登记处：所有写 `repos.tags` 的路径先过 `tags.ensure_tags` 归一——别名精确命中直接映射，

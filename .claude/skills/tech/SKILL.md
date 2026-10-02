@@ -2,7 +2,6 @@
 name: tech
 description: 从 celestial-snow 情报站选一个 issue，一次性生成三章 teach 风格课程并托管到平台 /courses。
 disable-model-invocation: true
-argument-hint: "issue_id [replace]（issue_id 省略时列出可学习的 issue；replace 表示覆盖已有课程，不再询问）"
 arguments: {"issue_id": {"type": "issue", "label": "目标 issue", "required": true}, "replace": {"type": "select", "label": "该 issue 已有课程时", "visible_if": "existing_course", "options": [{"value": "", "label": "另起新课（保留旧课）"}, {"value": "replace", "label": "重新生成（覆盖旧课，连记录与旧文件一起清）"}]}}
 ---
 
