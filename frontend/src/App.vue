@@ -1,4 +1,12 @@
 <template>
+  <div class="sky" aria-hidden="true">
+    <div class="sky-aurora a"></div>
+    <div class="sky-aurora b"></div>
+    <div class="sky-stars a"></div>
+    <div class="sky-stars b"></div>
+    <i class="sky-shoot s1"></i>
+    <i class="sky-shoot s2"></i>
+  </div>
   <el-container class="layout">
     <el-header class="header">
       <div class="brand">
@@ -14,24 +22,31 @@
         </div>
       </div>
       <div class="ops">
-        <el-tag v-if="config" :type="config.llm ? 'success' : 'info'" size="small" class="cfg-tag">
-          LLM {{ config.llm ? '已配置' : '未配置' }}
-        </el-tag>
-        <el-tag v-if="config" :type="config.github_token ? 'success' : 'warning'" size="small" class="cfg-tag">
-          GitHub Token {{ config.github_token ? '已配置' : '未配置（限流）' }}
-        </el-tag>
+        <div v-if="config" class="sys-status" aria-label="系统状态">
+          <span class="sys-item" :class="config.llm ? 'on' : 'off'"
+            :title="config.llm ? 'LLM 已配置' : 'LLM 未配置'"><i class="sys-dot"></i>LLM</span>
+          <span class="sys-item" :class="config.github_token ? 'on' : 'warn'"
+            :title="config.github_token ? 'GitHub Token 已配置' : 'GitHub Token 未配置（限流）'">
+            <i class="sys-dot"></i>GH</span>
+        </div>
+        <span class="sys-clock" title="观测站本地时间">{{ clock }}</span>
         <el-button type="primary" :loading="refreshing" @click="refresh">立即刷新榜单</el-button>
       </div>
     </el-header>
 
     <el-main>
-      <!-- AI 命令栏：自由指令，/开头即技能；行内「AI」按钮会把该行上下文预填到这里 -->
+      <!-- AI 命令栏：自由指令，/开头即技能；行内「AI」按钮会把该行上下文预填到这里。
+           placeholder 是逐字打出的幽灵提示（聚焦/有输入时让位），终端光标常闪 -->
       <div class="ai-bar">
         <span class="ai-glyph" aria-hidden="true">❯</span>
-        <el-input ref="agentInput" v-model="agentPrompt" class="ai-input" clearable
-          placeholder="告诉 AI 要做什么，如：分析 volcengine/OpenViking、给 issue #462 打分；也支持 /技能名 参数"
-          @keyup.enter="runAgentCmd" />
-        <el-button type="primary" :loading="agentRunning" @click="runAgentCmd">运行</el-button>
+        <div class="ai-field">
+          <el-input ref="agentInput" v-model="agentPrompt" class="ai-input" clearable
+            placeholder=" " @keyup.enter="runAgentCmd" />
+          <div v-if="!agentPrompt" class="ai-ghost" aria-hidden="true">
+            <span>{{ agentHint }}</span><span class="ai-caret"></span>
+          </div>
+        </div>
+        <el-button type="primary" :loading="agentRunning" @click="runAgentCmd">运行 ↵</el-button>
       </div>
 
       <el-tabs v-model="activeTab" class="main-tabs">
@@ -42,34 +57,39 @@
           </template>
 
           <div class="toolbar">
-            <el-radio-group v-model="analyzedFilter" @change="resetRepoPage">
-              <el-radio-button value="all">全部</el-radio-button>
-              <el-radio-button value="done">已精析</el-radio-button>
-              <el-radio-button value="todo">未精析</el-radio-button>
-            </el-radio-group>
-            <el-radio-group v-model="periodFilter" @change="resetRepoPage">
-              <el-radio-button value="all">全部</el-radio-button>
-              <el-radio-button value="weekly">周榜</el-radio-button>
-              <el-radio-button value="monthly">月榜</el-radio-button>
-            </el-radio-group>
-            <el-radio-group v-model="sort" @change="resetRepoPage">
-              <el-radio-button value="total">综合分</el-radio-button>
-              <el-radio-button value="rule">规则分</el-radio-button>
-              <el-radio-button value="stars">Star 数</el-radio-button>
-            </el-radio-group>
-            <el-select v-model="tagFilter" multiple clearable filterable collapse-tags collapse-tags-tooltip
-              placeholder="标签（多选交集）" class="tag-select" @change="resetRepoPage">
-              <el-option v-for="t in tagOptions" :key="t.tag" :value="t.tag" :label="`${t.tag}（${t.count}）`" />
-            </el-select>
-            <el-input v-model="q" placeholder="搜索项目名 / 描述" clearable class="search" @input="debouncedLoad" />
-            <el-button :loading="translating" @click="runTranslate">译中文简介</el-button>
-            <span class="picked-hint">已选 {{ picked.length }}/5</span>
-            <el-button type="warning" :disabled="picked.length === 0" :loading="analyzing" @click="analyzeSelected">
-              ✨ 精析选中
-            </el-button>
-            <el-button type="success" :disabled="picked.length === 0" :loading="contributing" @click="analyzeContribution">
-              分析贡献机会
-            </el-button>
+            <div class="tool-group">
+              <el-radio-group v-model="analyzedFilter" @change="resetRepoPage">
+                <el-radio-button value="all">全部</el-radio-button>
+                <el-radio-button value="done">已精析</el-radio-button>
+                <el-radio-button value="todo">未精析</el-radio-button>
+              </el-radio-group>
+              <el-radio-group v-model="periodFilter" @change="resetRepoPage">
+                <el-radio-button value="all">全部</el-radio-button>
+                <el-radio-button value="weekly">周榜</el-radio-button>
+                <el-radio-button value="monthly">月榜</el-radio-button>
+              </el-radio-group>
+              <el-radio-group v-model="sort" @change="resetRepoPage">
+                <el-radio-button value="total">综合分</el-radio-button>
+                <el-radio-button value="rule">规则分</el-radio-button>
+                <el-radio-button value="stars">Star 数</el-radio-button>
+              </el-radio-group>
+              <el-select v-model="tagFilter" multiple clearable filterable collapse-tags collapse-tags-tooltip
+                placeholder="标签（多选交集）" class="tag-select" @change="resetRepoPage">
+                <el-option v-for="t in tagOptions" :key="t.tag" :value="t.tag" :label="`${t.tag}（${t.count}）`" />
+              </el-select>
+              <el-input v-model="q" placeholder="搜索项目名 / 描述" clearable class="search" @input="debouncedLoad" />
+            </div>
+            <i class="tool-sep" aria-hidden="true"></i>
+            <div class="tool-group">
+              <span class="picked-hint">已选 {{ picked.length }}/5</span>
+              <el-button :loading="translating" @click="runTranslate">译中文简介</el-button>
+              <el-button type="warning" :disabled="picked.length === 0" :loading="analyzing" @click="analyzeSelected">
+                ✧ 精析选中
+              </el-button>
+              <el-button type="success" :disabled="picked.length === 0" :loading="contributing" @click="analyzeContribution">
+                分析贡献机会
+              </el-button>
+            </div>
           </div>
 
           <el-table :data="repos" v-loading="loading" @selection-change="onSelect" row-key="id" stripe>
@@ -78,14 +98,18 @@
               <template #default="{ row }">
                 <div class="repo-title">
                   <a :href="`https://github.com/${row.full_name}`" target="_blank" class="repo-name">{{ row.full_name }}</a>
-                  <el-tag v-if="row.ai_analyzed" type="warning" size="small" effect="plain">AI 析</el-tag>
-                  <el-tag v-if="periodLabel(row.periods)" :type="row.periods.length > 1 ? 'danger' : 'primary'"
+                  <el-tag v-if="row.ai_analyzed" type="info" size="small" effect="plain">AI 析</el-tag>
+                  <el-tag v-if="periodLabel(row.periods)" type="info"
                     size="small" effect="plain">{{ periodLabel(row.periods) }}</el-tag>
                 </div>
                 <div class="repo-desc">{{ row.description }}</div>
                 <div v-if="(row.tags || []).length" class="repo-tags">
-                  <el-tag v-for="t in row.tags" :key="t" size="small" effect="plain" class="tag-chip"
-                    @click="filterTag(t)">{{ t }}</el-tag>
+                  <el-tag v-for="t in (row.tags || []).slice(0, 3)" :key="t" size="small" effect="plain"
+                    class="tag-chip" @click="filterTag(t)">{{ t }}</el-tag>
+                  <el-tooltip v-if="(row.tags || []).length > 3"
+                    :content="(row.tags || []).slice(3).join(' · ')" placement="top" :show-after="300">
+                    <span class="tag-more">+{{ row.tags.length - 3 }}</span>
+                  </el-tooltip>
                 </div>
               </template>
             </el-table-column>
@@ -100,7 +124,11 @@
             </el-table-column>
             <el-table-column prop="language" label="语言" width="110" />
             <el-table-column label="Star" width="100" sortable :sort-by="'stars'">
-              <template #default="{ row }">⭐ {{ row.stars.toLocaleString() }}</template>
+              <template #default="{ row }">
+                <span class="star-cell" :title="`${row.stars.toLocaleString()} stars`">
+                  <i class="star-glyph" aria-hidden="true">✦</i>{{ fmtStars(row.stars) }}
+                </span>
+              </template>
             </el-table-column>
             <el-table-column label="建立 / 活跃" width="125">
               <template #default="{ row }">
@@ -119,11 +147,14 @@
             </el-table-column>
             <el-table-column label="综合分" width="100" sortable :sort-by="'total_score'">
               <template #default="{ row }">
-                <el-tag :type="scoreType(row.total_score)">{{ row.total_score }}</el-tag>
+                <div class="score-cell" :class="`band-${scoreType(row.total_score)}`">
+                  <span class="score-val">{{ row.total_score }}</span>
+                  <i class="score-meter" :style="{ width: Math.min(row.total_score, 100) + '%' }"></i>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="规则分" width="90" sortable :sort-by="'rule_score'">
-              <template #default="{ row }">{{ row.rule_score }}</template>
+              <template #default="{ row }"><span class="rule-sub">{{ row.rule_score }}</span></template>
             </el-table-column>
             <el-table-column label="LLM" width="90">
               <template #default="{ row }">
@@ -131,14 +162,14 @@
                 <el-tag v-else type="info" size="small">未分析</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="200" fixed="right">
+            <el-table-column label="操作" width="210" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" @click="openDetail(row)">详情</el-button>
+                <el-button size="small" @click="openDetail(row)">详情</el-button>
                 <el-button v-if="row.latest_report" link type="success" @click="openReport(row.latest_report.id)">
                   贡献报告
                 </el-button>
                 <el-tooltip content="把该项目上下文预填进顶部 AI 命令栏" placement="top">
-                  <el-button link type="warning" @click="aiRepoCmd(row)">✨ AI</el-button>
+                  <el-button link type="warning" @click="aiRepoCmd(row)">✧ AI</el-button>
                 </el-tooltip>
               </template>
             </el-table-column>
@@ -188,13 +219,15 @@
           <el-table :data="issues" v-loading="issueLoading" row-key="id" stripe>
             <el-table-column label="匹配度" width="150" sortable :sort-by="'effective_score'">
               <template #default="{ row }">
-                <div class="match-cell">
-                  <el-progress :percentage="Math.min(row.effective_score, 100)" :stroke-width="10"
-                    :color="matchColor(row.effective_score)" class="match-bar" />
+                <div class="match-meter" :class="matchBand(row.effective_score)"
+                  :title="`匹配度 ${row.effective_score}（${row.match_score != null ? 'LLM 精筛' : '规则预估'}）`">
+                  <div class="match-track"><i class="match-fill"
+                    :style="{ width: Math.min(row.effective_score, 100) + '%' }"></i></div>
                   <span class="match-num">{{ row.effective_score }}</span>
                 </div>
-                <el-tag v-if="row.match_score != null" type="success" size="small">LLM 评分</el-tag>
-                <el-tag v-else type="info" size="small">规则预估</el-tag>
+                <span class="match-src" :class="row.match_score != null ? 'llm' : 'rule'">
+                  {{ row.match_score != null ? 'LLM 评分' : '规则预估' }}
+                </span>
               </template>
             </el-table-column>
             <el-table-column label="Issue" min-width="320">
@@ -204,7 +237,7 @@
                   <span class="repo-attr">{{ row.repo }} #{{ row.number }}</span>
                   <el-tag v-for="lb in row.labels.slice(0, 3)" :key="lb" size="small" effect="plain"
                     class="label-tag">{{ lb }}</el-tag>
-                  <el-tag v-if="row.fixed_hint" type="warning" size="small" effect="plain" class="label-tag">⚠ 疑似已修复</el-tag>
+                  <el-tag v-if="row.fixed_hint" type="warning" size="small" effect="plain" class="label-tag">疑似已修复</el-tag>
                 </div>
               </template>
             </el-table-column>
@@ -220,7 +253,7 @@
               <template #default="{ row }">
                 <div v-if="row.summary || row.action">
                   <div class="issue-summary">{{ row.summary }}</div>
-                  <div v-if="row.action" class="issue-action">👉 {{ row.action }}</div>
+                  <div v-if="row.action" class="issue-action"><i class="act-glyph" aria-hidden="true">▸</i>{{ row.action }}</div>
                 </div>
                 <div v-else-if="row.body_excerpt" class="muted body-cut">{{ row.body_excerpt.slice(0, 90) }}…</div>
                 <div v-else class="muted">刷新时会为高分 issue 自动生成摘要</div>
@@ -242,14 +275,14 @@
             <el-table-column label="AI" width="56">
               <template #default="{ row }">
                 <el-tooltip content="把该 issue 上下文预填进顶部 AI 命令栏" placement="top">
-                  <el-button link type="warning" size="small" @click="aiIssueCmd(row)">✨</el-button>
+                  <el-button link type="warning" size="small" @click="aiIssueCmd(row)">✧</el-button>
                 </el-tooltip>
               </template>
             </el-table-column>
             <el-table-column label="学习" width="130">
               <template #default="{ row }">
-                <el-tag v-if="row.learning_status === 'done'" type="success" size="small">✅ 已完成</el-tag>
-                <el-tag v-else-if="row.learning_status === 'learning'" type="primary" size="small">📖 学习中</el-tag>
+                <el-tag v-if="row.learning_status === 'done'" type="success" size="small">已完成</el-tag>
+                <el-tag v-else-if="row.learning_status === 'learning'" type="primary" size="small">学习中</el-tag>
                 <el-tooltip v-else content="复制后在 Claude Code 中运行 /tech <issue_id> 生成课程" placement="top">
                   <el-button link type="primary" size="small" @click="copyTech(row)">生成课程</el-button>
                 </el-tooltip>
@@ -298,8 +331,8 @@
                 <el-select v-if="r.candidates.length" v-model="r.selected" filterable size="small"
                   class="parse-select" placeholder="选择仓库">
                   <el-option v-for="c in r.candidates" :key="c.full_name" :value="c.full_name"
-                    :label="`${c.full_name}（⭐${(c.stars || 0).toLocaleString()}）`">
-                    <span>{{ c.full_name }} ⭐{{ (c.stars || 0).toLocaleString() }}</span>
+                    :label="`${c.full_name}（✦${(c.stars || 0).toLocaleString()}）`">
+                    <span>{{ c.full_name }} ✦{{ (c.stars || 0).toLocaleString() }}</span>
                     <span class="parse-cand-desc">{{ c.description }}</span>
                   </el-option>
                 </el-select>
@@ -434,31 +467,35 @@
             description="还没有课程——从 Issue / 项目 / PDF 教材生成，或直接导入教程包" />
 
           <el-row :gutter="14">
-            <el-col v-for="c in courses" :key="c.id" :span="8" class="course-col">
+            <el-col v-for="(c, ci) in courses" :key="c.id" :xs="24" :sm="12" :md="8" class="course-col"
+              :style="{ '--d': ci }">
               <el-card shadow="hover" class="course-card">
                 <div class="course-head">
                   <span class="course-title">{{ c.title }}</span>
                   <el-tag :type="c.status === 'done' ? 'success' : 'primary'" size="small">
-                    {{ c.status === 'done' ? '✅ 已完成' : '📖 学习中' }}
+                    {{ c.status === 'done' ? '已完成' : '学习中' }}
                   </el-tag>
                 </div>
                 <div class="repo-desc course-meta">
                   <template v-if="c.source_type === 'repo'">
-                    <span class="repo-attr">📁 项目课</span>{{ c.repo }}
+                    <span class="src-badge">◇ 项目课</span>{{ c.repo }}
                   </template>
                   <template v-else-if="c.source_type === 'book'">
-                    <span class="repo-attr">📖 教材课</span>{{ c.book_title || '（教材已删）' }}
+                    <span class="src-badge">▤ 教材课</span>{{ c.book_title || '（教材已删）' }}
                   </template>
                   <template v-else-if="c.source_type === 'import'">
-                    <span class="repo-attr">📦 导入</span>{{ c.series ? `${c.series} · 第${c.series_no}门 · ` : '' }}{{ (c.created_at || '').slice(0, 10) }} 上传
+                    <span class="src-badge">◱ 导入</span>{{ c.series ? `${c.series} · 第${c.series_no}门 · ` : '' }}{{ (c.created_at || '').slice(0, 10) }} 上传
                   </template>
                   <template v-else>
                     <span class="repo-attr">{{ c.repo }} #{{ c.issue_number }}</span>{{ c.issue_title }}
                   </template>
                 </div>
+                <div class="course-progress" :title="`已完成 ${c.done_lessons}/${c.total_lessons} 节`">
+                  <i :style="{ width: (c.total_lessons ? (c.done_lessons / c.total_lessons) * 100 : 0) + '%' }"></i>
+                </div>
                 <div class="course-lessons">
                   <div v-for="l in c.lessons" :key="l.lesson_id" class="lesson-row">
-                    <span class="lesson-check">{{ l.submitted ? '✅' : '⬜' }}</span>
+                    <span class="lesson-check" :class="{ done: l.submitted }" aria-hidden="true"></span>
                     <span class="lesson-name">{{ l.title }}</span>
                     <span v-if="l.submitted" class="lesson-score">{{ l.score }}/{{ l.total }}</span>
                   </div>
@@ -492,12 +529,13 @@
             description="没有发现技能——在项目 .claude/skills/ 下建一个含 SKILL.md 的目录，保存后点「刷新技能」立刻可见" />
 
           <el-row :gutter="14">
-            <el-col v-for="s in skills" :key="s.scope + '-' + s.name" :span="8" class="course-col">
+            <el-col v-for="(s, si) in skills" :key="s.scope + '-' + s.name" :xs="24" :sm="12" :md="8"
+              class="course-col" :style="{ '--d': si }">
               <el-card shadow="hover" class="course-card">
                 <div class="course-head">
                   <span class="course-title">/{{ s.name }}</span>
                   <span>
-                    <el-tag v-if="s.requires === 'local'" type="warning" size="small">🖥 需本地</el-tag>
+                    <el-tag v-if="s.requires === 'local'" type="warning" size="small">需本地</el-tag>
                     <el-tag size="small" :type="s.scope === 'project' ? 'primary' : 'info'">
                       {{ s.scope === 'project' ? '项目级' : '全局' }}
                     </el-tag>
@@ -520,7 +558,7 @@
             <el-table-column label="技能 / 命令" width="180">
               <template #default="{ row }">
                 <span v-if="row.type === 'skill'">/{{ row.payload?.skill }}</span>
-                <span v-else class="agent-prompt">🤖 {{ (row.payload?.prompt || '').slice(0, 30) }}</span>
+                <span v-else class="agent-prompt"><i class="act-glyph" aria-hidden="true">▸</i>{{ (row.payload?.prompt || '').slice(0, 30) }}</span>
               </template>
             </el-table-column>
             <el-table-column label="参数" min-width="160">
@@ -551,8 +589,8 @@
     <el-drawer v-model="detailVisible" :title="detail?.full_name" size="46%">
       <template v-if="detail">
         <div class="detail-stats">
-          <el-tag>⭐ {{ detail.stars.toLocaleString() }}</el-tag>
-          <el-tag v-if="periodLabel(detail.periods)" type="danger">{{ periodLabel(detail.periods) }}</el-tag>
+          <el-tag>✦ {{ detail.stars.toLocaleString() }}</el-tag>
+          <el-tag v-if="periodLabel(detail.periods)">{{ periodLabel(detail.periods) }}</el-tag>
           <el-tag v-if="detail.language" type="warning">{{ detail.language }}</el-tag>
           <el-tag v-if="detail.license" type="info">{{ detail.license }}</el-tag>
           <el-tag type="success">规则分 {{ detail.rule_score }}</el-tag>
@@ -575,7 +613,7 @@
         <h4>LLM 评分</h4>
         <div v-for="v in llmScoreList" :key="v.key" class="score-row">
           <span class="score-name">{{ v.label }}</span>
-          <el-progress :percentage="v.score" :stroke-width="14" class="score-bar" />
+          <el-progress :percentage="v.score" :stroke-width="14" class="score-bar llm" />
           <span class="score-reason">{{ v.reason }}</span>
         </div>
         <p v-if="!llmScoreList.length" class="muted">未分析</p>
@@ -583,7 +621,7 @@
         <h4>规则评分明细</h4>
         <div v-for="v in ruleScoreList" :key="v.key" class="score-row">
           <span class="score-name">{{ v.label }}</span>
-          <el-progress :percentage="v.score" :stroke-width="14" class="score-bar" />
+          <el-progress :percentage="v.score" :stroke-width="14" class="score-bar rule" />
           <span class="score-reason">{{ v.reason }}</span>
         </div>
 
@@ -651,7 +689,7 @@
           <div class="industry-cat">{{ cat || '未分类' }}<span class="muted">（{{ group.length }}）</span></div>
           <div v-for="p in group" :key="p.full_name" class="industry-project">
             <a :href="`https://github.com/${p.full_name}`" target="_blank" class="repo-name">{{ p.full_name }}</a>
-            <span class="muted industry-stars">⭐ {{ (p.stars || 0).toLocaleString() }}</span>
+            <span class="muted industry-stars"><i class="star-glyph" aria-hidden="true">✦</i>{{ (p.stars || 0).toLocaleString() }}</span>
             <span class="industry-pos">{{ p.position }}</span>
             <el-button link type="primary" size="small" @click="openDetail({ full_name: p.full_name })">
               库内详情
@@ -734,7 +772,7 @@
                     {{ row.full_name }}
                   </a>
                   <el-tag size="small" effect="plain">{{ row.language || '?' }}</el-tag>
-                  <span class="muted">⭐ {{ (row.stars || 0).toLocaleString() }}</span>
+                  <span class="muted"><i class="star-glyph" aria-hidden="true">✦</i>{{ (row.stars || 0).toLocaleString() }}</span>
                 </div>
                 <div class="repo-desc">{{ row.zh_desc || row.description }}</div>
               </template>
@@ -754,8 +792,8 @@
           </el-table>
 
           <div class="detail-actions">
-            <el-button :loading="scaffoldRematching" @click="rematchScaffoldRow">🔄 重新匹配（可改话）</el-button>
-            <el-button type="warning" :loading="splittingScaffold" @click="runSplit">🔧 拆条继续</el-button>
+            <el-button :loading="scaffoldRematching" @click="rematchScaffoldRow">↻ 重新匹配（可改话）</el-button>
+            <el-button type="warning" :loading="splittingScaffold" @click="runSplit">拆条继续</el-button>
           </div>
         </template>
 
@@ -770,7 +808,7 @@
             </el-select>
             <el-button size="small" @click="addSplitItem">＋ 添加条目</el-button>
             <el-tooltip content="重新让 LLM 拆解（会覆盖当前编辑；同一句话命中缓存秒出）" placement="top">
-              <el-button size="small" :loading="splittingScaffold" @click="runSplit">🔄 重新拆条</el-button>
+              <el-button size="small" :loading="splittingScaffold" @click="runSplit">↻ 重新拆条</el-button>
             </el-tooltip>
           </div>
           <div v-for="(it, i) in splitItems" :key="i" class="split-row">
@@ -786,7 +824,7 @@
           </div>
           <div class="detail-actions">
             <el-button type="primary" :loading="scaffoldSelecting" @click="confirmItems">
-              ✅ 确认并选型（{{ splitItems.length }} 条）
+              确认并选型（{{ splitItems.length }} 条）
             </el-button>
           </div>
         </template>
@@ -810,14 +848,14 @@
                 <span class="muted sel-reason">{{ c.reason }}</span>
               </el-radio>
               <el-radio :value="SELF_DEV" class="sel-radio">
-                <span class="muted">🔧 自研（无合适开源，生成时从零写骨架）</span>
+                <span class="muted">自研（无合适开源，生成时从零写骨架）</span>
               </el-radio>
             </el-radio-group>
           </div>
           <div class="detail-actions">
-            <el-button @click="startEditItems">✏️ 改条目重选</el-button>
+            <el-button @click="startEditItems">改条目重选</el-button>
             <el-button type="success" :disabled="!allChosen" :loading="scaffoldBuilding"
-              @click="generateScaffold">🏗 生成脚手架</el-button>
+              @click="generateScaffold">生成脚手架</el-button>
           </div>
           <div v-if="!allChosen" class="muted">还有条目未选完（自研也算一种选择）。</div>
         </template>
@@ -826,12 +864,12 @@
         <template v-else-if="scaffoldDetail.status === 'built' && scaffoldDetail.build?.zip_url">
           <h4>脚手架已生成</h4>
           <div class="detail-stats">
-            <el-tag type="success">📦 {{ scaffoldDetail.build.file_count }} 个文件</el-tag>
+            <el-tag type="success">{{ scaffoldDetail.build.file_count }} 个文件</el-tag>
             <el-tag type="info">{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB</el-tag>
             <el-tag v-if="scaffoldDetail.build.turns" type="warning">
               {{ scaffoldDetail.build.turns }} 轮 / ${{ (scaffoldDetail.build.cost_usd || 0).toFixed(2) }}
             </el-tag>
-            <el-tag v-if="scaffoldDetail.build.cache_hit" type="primary">⚡ 产物缓存命中</el-tag>
+            <el-tag v-if="scaffoldDetail.build.cache_hit" type="primary">产物缓存命中</el-tag>
           </div>
           <p v-if="scaffoldDetail.build.base">
             <b>base 主干：</b>
@@ -844,7 +882,7 @@
 
           <h4>六件套清单</h4>
           <div class="six-list">
-            <div v-for="f in sixFiles" :key="f" class="six-item">✅ {{ f }}</div>
+            <div v-for="f in sixFiles" :key="f" class="six-item"><i class="tick-glyph" aria-hidden="true">✓</i>{{ f }}</div>
           </div>
           <el-alert v-if="(scaffoldDetail.build.warnings || []).length" type="warning" :closable="false"
             class="task-alert">
@@ -854,8 +892,8 @@
           </el-alert>
 
           <div class="detail-actions">
-            <el-button type="primary" @click="downloadZip">⬇️ 下载 zip（{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB）</el-button>
-            <el-button :loading="scaffoldBuilding" @click="generateScaffold">🔄 重新生成</el-button>
+            <el-button type="primary" @click="downloadZip">下载 zip（{{ Math.round((scaffoldDetail.build.total_bytes || 0) / 1024) }} KB）</el-button>
+            <el-button :loading="scaffoldBuilding" @click="generateScaffold">↻ 重新生成</el-button>
             <el-tooltip content="回到选型改组件后再生成；同组合会命中产物缓存不重跑" placement="top">
               <el-button @click="reselectScaffold">改选型</el-button>
             </el-tooltip>
@@ -871,7 +909,7 @@
             </el-alert>
             <div class="detail-actions">
               <el-button type="primary" :loading="scaffoldBuilding" @click="retryScaffoldBuild">
-                🔄 重试生成
+                ↻ 重试生成
               </el-button>
               <el-button @click="reselectScaffold">改选型后再生成</el-button>
             </div>
@@ -994,7 +1032,7 @@
         </div>
         <el-tag :type="b.status === 'ready' ? 'success' : b.status === 'failed' ? 'danger' : 'primary'"
           size="small" class="book-status">
-          {{ b.status === 'ready' ? '✓ 可生成' : b.status === 'failed' ? '✕ 解析失败' : '⟳ 解析中' }}
+          {{ b.status === 'ready' ? '✓ 可生成' : b.status === 'failed' ? '✕ 解析失败' : '解析中…' }}
         </el-tag>
         <div class="book-actions">
           <template v-if="b.status === 'ready'">
@@ -1124,7 +1162,7 @@
                 <el-button size="small" type="primary" :loading="c.submitting" @click="submitAnswer(c)">提交回答</el-button>
               </div>
             </div>
-            <div v-else-if="c.status === 'waiting' && c.answered" class="tc-answered">✅ 已提交，任务继续执行…</div>
+            <div v-else-if="c.status === 'waiting' && c.answered" class="tc-answered">✓ 已提交，任务继续执行…</div>
 
             <div v-show="c.expanded && c.logs.length" :data-task="c.id" class="task-logs">
               <div v-for="(l, i) in logLinesOf(c)" :key="i" class="log-line">
@@ -1357,7 +1395,7 @@ function statusLabel(s) {
 }
 
 function statusIcon(s) {
-  return s === 'running' ? '⟳' : s === 'waiting' ? '✋' : s === 'success' ? '✓' : '✕'
+  return s === 'running' ? '⟳' : s === 'waiting' ? '?' : s === 'success' ? '✓' : '✕'
 }
 
 const TASK_TYPE_LABELS = {
@@ -1379,15 +1417,15 @@ const TASK_TYPE_LABELS = {
  *  只显示进度行会让人以为同一件事在反复横跳。*/
 function panelLabel(t) {
   if (!t) return ''
-  if (t.type === 'agent') return `🤖 ${(t.payload?.prompt || 'AI 命令').slice(0, 30)}`
+  if (t.type === 'agent') return (t.payload?.prompt || 'AI 命令').slice(0, 30)
   if (t.type === 'skill') return `/${t.payload?.skill || '技能'} ${t.payload?.args || ''}`.trim()
-  if (t.type === 'industry') return `🧭 行业分析 · ${t.payload?.args?.[0] || ''}`
-  if (t.type === 'analyze') return `🔬 批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
-  if (t.type === 'book_extract') return `📖 教材解析 #${t.payload?.book_id ?? '?'}`
-  if (t.type === 'book_series') return `📚 教材系列课 · ${t.payload?.chapter_nos?.length || '?'} 章`
-  if (t.type === 'scaffold_match') return `🏗 需求 #${t.payload?.request_id ?? '?'} 框架匹配`
-  if (t.type === 'scaffold_select') return `🏗 需求 #${t.payload?.request_id ?? '?'} 条目选型`
-  if (t.type === 'scaffold_build') return `🏗 需求 #${t.payload?.request_id ?? '?'} 生成脚手架`
+  if (t.type === 'industry') return `行业分析 · ${t.payload?.args?.[0] || ''}`
+  if (t.type === 'analyze') return `批量精析 ${((t.payload?.args?.[0] || '').match(/\d+/g) || []).length} 个项目`
+  if (t.type === 'book_extract') return `教材解析 #${t.payload?.book_id ?? '?'}`
+  if (t.type === 'book_series') return `教材系列课 · ${t.payload?.chapter_nos?.length || '?'} 章`
+  if (t.type === 'scaffold_match') return `需求 #${t.payload?.request_id ?? '?'} 框架匹配`
+  if (t.type === 'scaffold_select') return `需求 #${t.payload?.request_id ?? '?'} 条目选型`
+  if (t.type === 'scaffold_build') return `需求 #${t.payload?.request_id ?? '?'} 生成脚手架`
   return TASK_TYPE_LABELS[t.type] || t.type
 }
 
@@ -1600,6 +1638,75 @@ function matchColor(v) {
   if (v >= 70) return '#34d399'
   if (v >= 40) return '#fbbf24'
   return '#64748b'
+}
+
+/** 匹配度档位：hi/mid/low 对应仪表配色（matchColor 的 class 版） */
+function matchBand(v) {
+  if (v >= 70) return 'hi'
+  if (v >= 40) return 'mid'
+  return 'low'
+}
+
+/** star 数紧凑显示：≥1千一律缩成 5.2k，与整数值同一套视觉节奏（精确值在 title 里） */
+function fmtStars(n) {
+  if (n == null) return '—'
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
+// ---------- 顶栏观测站时钟（tick 驱动，秒级跳动） ----------
+
+const clock = computed(() => {
+  void tick.value
+  const d = new Date()
+  const pad = (x) => String(x).padStart(2, '0')
+  const off = -d.getTimezoneOffset() / 60
+  const tz = `UTC${off >= 0 ? '+' : ''}${Number.isInteger(off) ? off : off.toFixed(1)}`
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())} ${tz}`
+})
+
+// ---------- AI 命令栏幽灵提示：逐字打出示例指令，打完停留再擦除轮播 ----------
+// 输入框有内容时挂起（不打扰真输入）；系统开了 reduced-motion 就不出动画，静态轮换
+
+const AGENT_HINTS = [
+  '分析 volcengine/OpenViking，值得投入吗？',
+  '给 issue #462 打分，适合我上手吗？',
+  '对比 langgenius/dify 与 n8n-io/n8n 的定位',
+  '/tech-repo 12　—— 给这个项目生成一门导览课',
+  '把「agent 运行时」方向的开源格局摸个底',
+]
+const agentHint = ref(AGENT_HINTS[0])
+const hintRun = { i: 0, pos: AGENT_HINTS[0].length, erasing: true }
+let hintTimer = null
+const reduceMotion = typeof matchMedia !== 'undefined'
+  && matchMedia('(prefers-reduced-motion: reduce)').matches
+
+function hintStep() {
+  if (agentPrompt.value) { hintTimer = setTimeout(hintStep, 1500); return }
+  const full = AGENT_HINTS[hintRun.i]
+  if (reduceMotion) {
+    hintRun.i = (hintRun.i + 1) % AGENT_HINTS.length
+    agentHint.value = AGENT_HINTS[hintRun.i]
+    hintTimer = setTimeout(hintStep, 6000)
+    return
+  }
+  if (!hintRun.erasing) {
+    hintRun.pos++
+    agentHint.value = full.slice(0, hintRun.pos)
+    if (hintRun.pos >= full.length) { hintRun.erasing = true; hintTimer = setTimeout(hintStep, 3200); return }
+  } else {
+    hintRun.pos -= 3
+    if (hintRun.pos <= 0) {
+      hintRun.pos = 0
+      hintRun.erasing = false
+      hintRun.i = (hintRun.i + 1) % AGENT_HINTS.length
+      agentHint.value = ''
+      hintTimer = setTimeout(hintStep, 500)
+      return
+    }
+    agentHint.value = full.slice(0, hintRun.pos)
+  }
+  hintTimer = setTimeout(hintStep, hintRun.erasing ? 26 : 55 + Math.random() * 55)
 }
 
 async function loadRepos() {
@@ -2381,7 +2488,7 @@ function prefillAgent(text) {
 
 // 行内预填：把该行的关键数据内联进指令，AI 无需再查即有上下文
 function aiRepoCmd(row) {
-  prefillAgent(`分析 ${row.full_name}（语言 ${row.language || '未知'}，⭐${row.stars.toLocaleString()}，综合分 ${row.total_score}）：`)
+  prefillAgent(`分析 ${row.full_name}（语言 ${row.language || '未知'}，stars ${row.stars.toLocaleString()}，综合分 ${row.total_score}）：`)
 }
 
 function aiIssueCmd(row) {
@@ -2394,7 +2501,7 @@ async function runAgentCmd() {
   agentRunning.value = true
   try {
     const { task_id: taskId } = await runAgent(prompt)
-    ElMessage.success('AI 命令已提交，进度见右下角任务中心，结果完成后在「🛠 技能 · 最近执行」查看')
+    ElMessage.success('AI 命令已提交，进度见右下角任务中心，结果完成后在「技能 · 最近执行」查看')
     agentPrompt.value = ''
     loadSkillTasks()
     focusTask(taskId, loadSkillTasks)
@@ -2635,10 +2742,12 @@ onMounted(async () => {
   loadTags()
   startCenter() // 首轮扫描：刷新页面后运行中/等待中任务自动上卡继续跟
   tickTimer = setInterval(() => tick.value++, 1000)
+  hintTimer = setTimeout(hintStep, 4200) // 首屏先读完整提示，再开始轮播
 })
 onBeforeUnmount(() => {
   stopCenter()
   if (tickTimer) clearInterval(tickTimer)
+  if (hintTimer) clearTimeout(hintTimer)
 })
 </script>
 
@@ -2762,18 +2871,66 @@ body::before {
     radial-gradient(1000px 520px at 6% -12%, rgba(56, 189, 248, .13), transparent 62%),
     radial-gradient(1200px 560px at 94% -4%, rgba(139, 92, 246, .10), transparent 62%),
     radial-gradient(900px 640px at 52% 118%, rgba(45, 212, 191, .07), transparent 62%),
-    radial-gradient(1.4px 1.4px at 12% 22%, rgba(226, 240, 255, .60), transparent 55%),
-    radial-gradient(1px 1px at 28% 68%, rgba(226, 240, 255, .40), transparent 55%),
-    radial-gradient(1.2px 1.2px at 41% 12%, rgba(226, 240, 255, .48), transparent 55%),
-    radial-gradient(.8px .8px at 55% 44%, rgba(226, 240, 255, .34), transparent 55%),
-    radial-gradient(1.4px 1.4px at 67% 76%, rgba(226, 240, 255, .44), transparent 55%),
-    radial-gradient(1px 1px at 76% 9%, rgba(226, 240, 255, .52), transparent 55%),
-    radial-gradient(.9px .9px at 85% 57%, rgba(226, 240, 255, .36), transparent 55%),
-    radial-gradient(1.1px 1.1px at 93% 84%, rgba(226, 240, 255, .42), transparent 55%),
-    radial-gradient(.8px .8px at 5% 82%, rgba(226, 240, 255, .30), transparent 55%),
-    radial-gradient(1.2px 1.2px at 34% 92%, rgba(226, 240, 255, .38), transparent 55%),
-    radial-gradient(1px 1px at 61% 27%, rgba(196, 216, 255, .30), transparent 55%),
     linear-gradient(180deg, #0b1122 0%, #070c17 100%);
+}
+
+/* ---------- 动态天空层：双星野反相呼吸 + 极光缓慢漂移 + 周期流星 ----------
+   独立于 body 伪元素，平铺坐标覆盖整页滚动高度；动画只走 transform/opacity（GPU 合成） */
+
+.sky { position: fixed; inset: 0; z-index: -2; overflow: hidden; pointer-events: none; }
+.sky-aurora { position: absolute; border-radius: 50%; filter: blur(70px); will-change: transform; }
+.sky-aurora.a {
+  width: 62vw; height: 48vh; left: -14vw; top: -18vh;
+  background: radial-gradient(circle, rgba(56, 189, 248, .17), transparent 70%);
+  animation: aurora-a 52s ease-in-out infinite alternate;
+}
+.sky-aurora.b {
+  width: 56vw; height: 44vh; right: -16vw; top: -12vh;
+  background: radial-gradient(circle, rgba(139, 92, 246, .14), transparent 70%);
+  animation: aurora-b 64s ease-in-out infinite alternate;
+}
+@keyframes aurora-a { from { transform: translate3d(0, 0, 0) scale(1); } to { transform: translate3d(6vw, 5vh, 0) scale(1.16); } }
+@keyframes aurora-b { from { transform: translate3d(0, 0, 0) scale(1.08); } to { transform: translate3d(-7vw, 6vh, 0) scale(.94); } }
+
+.sky-stars { position: absolute; inset: 0; background-repeat: repeat; background-size: 620px 620px; }
+.sky-stars.a {
+  background-image:
+    radial-gradient(1.4px 1.4px at 86px 132px, rgba(226, 240, 255, .58), transparent 55%),
+    radial-gradient(1px 1px at 236px 78px, rgba(226, 240, 255, .40), transparent 55%),
+    radial-gradient(1.2px 1.2px at 388px 306px, rgba(226, 240, 255, .48), transparent 55%),
+    radial-gradient(.9px .9px at 540px 486px, rgba(214, 232, 255, .36), transparent 55%),
+    radial-gradient(1.3px 1.3px at 152px 452px, rgba(226, 240, 255, .46), transparent 55%),
+    radial-gradient(1px 1px at 470px 208px, rgba(226, 240, 255, .42), transparent 55%),
+    radial-gradient(1.1px 1.1px at 608px 56px, rgba(226, 240, 255, .44), transparent 55%);
+  animation: twinkle-a 7s ease-in-out infinite;
+}
+.sky-stars.b {
+  background-image:
+    radial-gradient(.8px .8px at 44px 44px, rgba(206, 228, 255, .34), transparent 55%),
+    radial-gradient(1px 1px at 178px 262px, rgba(206, 228, 255, .38), transparent 55%),
+    radial-gradient(.8px .8px at 320px 404px, rgba(206, 228, 255, .30), transparent 55%),
+    radial-gradient(1px 1px at 424px 128px, rgba(206, 228, 255, .40), transparent 55%),
+    radial-gradient(.9px .9px at 584px 342px, rgba(206, 228, 255, .32), transparent 55%),
+    radial-gradient(.8px .8px at 96px 560px, rgba(206, 228, 255, .30), transparent 55%);
+  animation: twinkle-b 11s ease-in-out infinite;
+}
+@keyframes twinkle-a { 0%, 100% { opacity: .95; } 50% { opacity: .45; } }
+@keyframes twinkle-b { 0%, 100% { opacity: .4; } 50% { opacity: .9; } }
+
+/* 流星：一颗 17s 周期，一颗 29s 反相——绝大多数时间不可见，只是偶尔划过 */
+.sky-shoot {
+  position: absolute;
+  width: 130px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(220, 240, 255, .95), transparent);
+  opacity: 0;
+}
+.sky-shoot.s1 { top: 16%; left: -12%; transform: rotate(-11deg); animation: shoot 17s linear infinite; }
+.sky-shoot.s2 { top: 42%; left: -12%; transform: rotate(-13deg); animation: shoot 29s linear infinite 9s; }
+@keyframes shoot {
+  0%, 93.4% { opacity: 0; transform: translate3d(0, 0, 0) rotate(-11deg); }
+  94% { opacity: .9; }
+  100% { opacity: 0; transform: translate3d(58vw, 12vw, 0) rotate(-11deg); }
 }
 
 body::after {
@@ -2849,15 +3006,31 @@ body::after {
 .brand-sub {
   font-family: var(--font-mono);
   font-size: 10px;
-  letter-spacing: .34em;
+  letter-spacing: .28em;
   color: var(--text-low);
 }
-.ops { display: flex; align-items: center; }
-.cfg-tag {
-  margin-right: 8px;
+.ops { display: flex; align-items: center; gap: 16px; }
+
+/* 系统状态灯 + 观测站时钟：mono 小字 + 呼吸点，替代原来两个占地的 el-tag */
+.sys-status { display: flex; gap: 14px; font-family: var(--font-mono); font-size: 11.5px; letter-spacing: .1em; }
+.sys-item { display: inline-flex; align-items: center; gap: 6px; color: var(--text-low); cursor: help; }
+.sys-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.sys-item.on { color: #67e0ab; }
+.sys-item.on .sys-dot { box-shadow: 0 0 7px rgba(52, 211, 153, .8); animation: sys-breath 3.4s ease-in-out infinite; }
+.sys-item.warn { color: var(--amber); }
+.sys-item.warn .sys-dot { box-shadow: 0 0 7px rgba(251, 191, 36, .7); animation: sys-breath 1.8s ease-in-out infinite; }
+.sys-item.off { color: var(--text-low); }
+@keyframes sys-breath { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+.sys-clock {
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: .04em;
+  font-size: 12px;
+  color: var(--text-mid);
+  letter-spacing: .06em;
+  font-variant-numeric: tabular-nums;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(8, 13, 26, .5);
 }
 
 /* ---------- AI 命令控制台 ---------- */
@@ -2873,6 +3046,7 @@ body::after {
   backdrop-filter: blur(10px);
   border: 1px solid var(--line);
   border-radius: 12px;
+  overflow: hidden;
   transition: border-color .25s, box-shadow .25s;
   animation: rise .5s .06s cubic-bezier(.2, .7, .25, 1) both;
 }
@@ -2885,6 +3059,24 @@ body::after {
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(160, 200, 255, .22), transparent);
 }
+/* 周期扫过的微光：命令台的「呼吸」，极低透明度不抢输入焦点 */
+.ai-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 34%;
+  pointer-events: none;
+  background: linear-gradient(100deg, transparent, rgba(160, 210, 255, .05), transparent);
+  transform: translateX(-120%) skewX(-12deg);
+  animation: ai-sheen 7s ease-in-out infinite;
+}
+@keyframes ai-sheen {
+  0%, 55% { transform: translateX(-120%) skewX(-12deg); opacity: 0; }
+  62% { opacity: 1; }
+  100% { transform: translateX(400%) skewX(-12deg); opacity: 0; }
+}
 .ai-bar:focus-within {
   border-color: rgba(111, 211, 242, .55);
   box-shadow: 0 0 0 1px rgba(111, 211, 242, .22), 0 0 30px rgba(111, 211, 242, .13);
@@ -2896,6 +3088,31 @@ body::after {
   color: var(--ice);
   text-shadow: 0 0 12px rgba(111, 211, 242, .65);
 }
+/* 幽灵提示：覆盖在空输入框上层的打字机提示（pointer-events 穿透点击聚焦输入框） */
+.ai-field { position: relative; flex: 1; display: flex; min-width: 0; }
+.ai-ghost {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  pointer-events: none;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  color: var(--text-low);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.ai-caret {
+  flex-shrink: 0;
+  width: 7px;
+  height: 15px;
+  margin-left: 3px;
+  background: var(--ice);
+  box-shadow: 0 0 8px rgba(111, 211, 242, .7);
+  animation: caret-blink 1.1s steps(1) infinite;
+}
+@keyframes caret-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
 .ai-bar .el-input__wrapper { background: transparent; box-shadow: none; }
 .ai-bar .el-input__inner {
   font-family: var(--font-mono);
@@ -2917,7 +3134,8 @@ body::after {
 }
 .main-tabs .el-tabs__nav-wrap::after {
   height: 1px;
-  background: linear-gradient(90deg, transparent, var(--line-strong) 18%, var(--line-strong) 82%, transparent);
+  /* 基线压得很低：激活能量条是主角，避免读成双下划线 */
+  background: linear-gradient(90deg, transparent, rgba(140, 175, 230, .16) 18%, rgba(140, 175, 230, .16) 82%, transparent);
 }
 .main-tabs .el-tabs__item {
   height: 46px;
@@ -2944,6 +3162,20 @@ body::after {
   letter-spacing: .08em;
   color: var(--ice);
   opacity: .45;
+  margin-right: 9px;
+  transition: opacity .2s;
+}
+.el-tabs__item.is-active .tab-label i {
+  opacity: 1;
+  text-shadow: 0 0 10px rgba(111, 211, 242, .75);
+}
+.tab-label i {
+  font-family: var(--font-mono);
+  font-style: normal;
+  font-size: 11px;
+  letter-spacing: .08em;
+  color: var(--ice);
+  opacity: .4;
   margin-right: 9px;
   transition: opacity .2s;
 }
@@ -3022,30 +3254,57 @@ body::after {
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(160, 200, 255, .24), transparent);
 }
+/* 内容面板四角只有 ⌜⌟ 两枚目标框角标——与页签是同一套 HUD 语言 */
+.main-tabs .el-tab-pane::after {
+  content: '';
+  position: absolute;
+  inset: 7px;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(111, 211, 242, .55), rgba(111, 211, 242, .55)) left 0 top 0 / 11px 1.5px,
+    linear-gradient(rgba(111, 211, 242, .55), rgba(111, 211, 242, .55)) left 0 top 0 / 1.5px 11px,
+    linear-gradient(rgba(111, 211, 242, .55), rgba(111, 211, 242, .55)) right 0 bottom 0 / 11px 1.5px,
+    linear-gradient(rgba(111, 211, 242, .55), rgba(111, 211, 242, .55)) right 0 bottom 0 / 1.5px 11px;
+  background-repeat: no-repeat;
+  opacity: .42;
+}
 
 /* ---------- 工具栏 ---------- */
 
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 14px;
   flex-wrap: wrap;
 }
-.search { width: 240px; }
+/* 工具栏分组：筛选项一组、批量操作一组，中间立一道发丝分隔 */
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tool-sep {
+  flex: 0 0 1px;
+  height: 24px;
+  background: var(--line-strong);
+}
+.search { width: 220px; }
 .diff-select { width: 130px; }
 .repo-select { width: 250px; }
 .tag-select { width: 170px; }
 .picked-hint {
-  margin-left: auto;
   font-family: var(--font-mono);
   font-size: 12px;
-  color: var(--text-low);
+  color: #93a5bd;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-/* 分段控件（el-radio-button） */
+/* 分段控件（el-radio-button）：次级控件，激活态克制——不让筛选盖过数据 */
 .toolbar .el-radio-button__inner {
-  padding: 7px 15px;
+  padding: 7px 14px;
   font-size: 12.5px;
   background: transparent;
   color: var(--text-mid);
@@ -3055,10 +3314,10 @@ body::after {
 }
 .toolbar .el-radio-button__inner:hover { color: var(--text-hi); }
 .toolbar .el-radio-button.is-active .el-radio-button__inner {
-  background: rgba(111, 211, 242, .13);
-  border-color: rgba(111, 211, 242, .45);
-  color: var(--ice-soft);
-  box-shadow: inset 0 0 0 1px rgba(111, 211, 242, .18), 0 0 14px rgba(111, 211, 242, .10);
+  background: rgba(111, 211, 242, .08);
+  border-color: rgba(111, 211, 242, .36);
+  color: var(--ice);
+  box-shadow: inset 0 0 0 1px rgba(111, 211, 242, .14);
 }
 .toolbar .el-checkbox__label { font-size: 13px; color: var(--text-mid); }
 
@@ -3131,11 +3390,19 @@ html.dark .el-radio__input.is-checked + .el-radio__label { color: var(--text-hi)
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
+/* 表头：mono 小号大写质感 + 底部亮线（数据列阵的「读数」起点） */
 .el-table th.el-table__cell {
-  font-weight: 600;
-  font-size: 11.5px;
-  letter-spacing: .06em;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 10.5px;
+  letter-spacing: .09em;
+  background: linear-gradient(180deg, rgba(111, 211, 242, .045), transparent),
+    var(--panel-deep);
+  border-bottom: 1px solid var(--line-strong) !important;
 }
+.el-table td.el-table__cell { border-bottom: 1px solid var(--line) !important; }
+.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell { border-bottom-color: transparent !important; }
+.el-table .el-table__row { transition: background-color .18s; }
 .el-table .cell { line-height: 1.55; }
 .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
   background: #111b2f;
@@ -3147,11 +3414,22 @@ html.dark .el-radio__input.is-checked + .el-radio__label { color: var(--text-hi)
 .repo-title { display: flex; align-items: center; gap: 8px; }
 .repo-name {
   font-weight: 600;
-  color: #dce8f6;
+  font-size: 14px;
+  color: #e2ecf8;
   text-decoration: none;
-  transition: color .15s;
+  background-image: linear-gradient(var(--ice), var(--ice));
+  background-size: 0% 1px;
+  background-position: 0 100%;
+  background-repeat: no-repeat;
+  padding-bottom: 1px;
+  transition: color .18s, background-size .28s cubic-bezier(.2, .7, .25, 1), text-shadow .18s;
 }
-.repo-name:hover { color: var(--ice-soft); text-shadow: 0 0 10px rgba(111, 211, 242, .35); }
+.repo-name:hover {
+  color: var(--ice-soft);
+  background-size: 100% 1px;
+  text-shadow: 0 0 10px rgba(111, 211, 242, .35);
+}
+.repo-name:focus-visible { outline: 1px solid rgba(111, 211, 242, .7); outline-offset: 2px; border-radius: 2px; }
 .repo-desc { color: #93a5bd; font-size: 12px; margin-top: 2px; }
 .repo-age { color: var(--text-low); font-size: 12px; }
 .repo-push { color: var(--text-mid); font-size: 12px; margin-top: 2px; }
@@ -3170,13 +3448,153 @@ html.dark .el-radio__input.is-checked + .el-radio__label { color: var(--text-hi)
   overflow: hidden;
   line-height: 1.55;
 }
-.repo-tags { margin-top: 4px; }
-.tag-chip { margin-right: 4px; cursor: pointer; }
+/* 表格内所有描述行统一二行截断——行高节奏一致（中文简介/项目描述/issue 摘要同规则） */
+.el-table .repo-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.el-table .issue-summary {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rule-sub {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-low);
+  font-variant-numeric: tabular-nums;
+}
+.repo-tags { margin-top: 4px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+/* 行内标签降为 slate 低语色：一行里 hue 有限，主数据（名/分/星）才允许上色 */
+.tag-chip {
+  --el-tag-bg-color: rgba(132, 150, 176, .07);
+  --el-tag-border-color: rgba(132, 150, 176, .24);
+  --el-tag-text-color: #9aaec4;
+  display: inline-block;
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  cursor: pointer;
+  transition: border-color .18s, background-color .18s, box-shadow .18s, transform .18s;
+}
+.tag-chip:hover {
+  border-color: rgba(111, 211, 242, .55);
+  color: var(--ice-soft);
+  box-shadow: 0 0 10px rgba(111, 211, 242, .14);
+  transform: translateY(-1px);
+}
+.tag-more {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-low);
+  cursor: help;
+  padding: 0 4px;
+}
+.tag-more:hover { color: var(--ice-soft); }
+
+/* 键盘可达：页签与链接的 focus 圈 */
+.el-tabs__item:focus-visible {
+  outline: 1px solid rgba(111, 211, 242, .7);
+  outline-offset: -4px;
+  border-radius: 4px;
+}
 
 .match-cell { display: flex; align-items: center; gap: 8px; }
 .match-bar { width: 90px; }
 .match-num { font-weight: 700; color: var(--text-hi); }
 .el-progress-bar__outer { background: rgba(255, 255, 255, .08); }
+
+/* ---------- 仪表化数据单元：star 数 / 综合分 / 匹配度 ---------- */
+
+.star-cell {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-mid);
+  white-space: nowrap;
+}
+.star-glyph {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--ice);
+  margin-right: 4px;
+  text-shadow: 0 0 7px rgba(111, 211, 242, .65);
+}
+
+/* 综合分：mono 数字 + 底部 2px 量程条（底轨 ::before，实宽 .score-meter） */
+.score-cell { position: relative; display: inline-block; width: 56px; padding-bottom: 7px; }
+.score-cell::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, .07);
+}
+.score-val { font-family: var(--font-mono); font-weight: 600; font-size: 13px; color: inherit; }
+.score-meter {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  box-shadow: 0 0 7px rgba(255, 255, 255, .12), 0 0 6px currentColor;
+  transition: width .5s cubic-bezier(.2, .7, .25, 1);
+}
+.band-success { color: var(--mint); }
+.band-warning { color: var(--amber); }
+.band-info { color: #8fa6c4; }
+
+/* 匹配度：带刻度的轨道 + 同色辉光填充 + 档位色 */
+.match-meter { display: flex; align-items: center; gap: 8px; }
+.match-meter.hi { color: var(--mint); }
+.match-meter.mid { color: var(--amber); }
+.match-meter.low { color: #7f95b3; }
+.match-track {
+  position: relative;
+  flex: 0 0 84px;
+  height: 4px;
+  border-radius: 2px;
+  background:
+    repeating-linear-gradient(90deg, rgba(255, 255, 255, .10) 0 1px, transparent 1px 21px),
+    rgba(255, 255, 255, .06);
+  overflow: hidden;
+}
+.match-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: currentColor;
+  border-radius: 2px;
+  box-shadow: 0 0 8px currentColor;
+  transition: width .5s cubic-bezier(.2, .7, .25, 1);
+}
+.match-meter .match-num { font-family: var(--font-mono); }
+.match-src {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .08em;
+  line-height: 16px;
+  border-radius: 3px;
+  border: 1px solid;
+}
+.match-src.llm { color: #6ee7b7; border-color: rgba(52, 211, 153, .35); background: rgba(52, 211, 153, .07); }
+.match-src.rule { color: #8ba0ba; border-color: rgba(139, 160, 186, .3); background: rgba(139, 160, 186, .06); }
+
+/* 行内小箭头 / 勾选符（替代 emoji 的统一几何符） */
+.act-glyph { font-style: normal; color: var(--amber); margin-right: 5px; }
+.tick-glyph { font-style: normal; color: var(--mint); margin-right: 6px; font-size: 12px; }
 
 /* ---------- 标签 ---------- */
 
@@ -3187,9 +3605,9 @@ html.dark .el-radio__input.is-checked + .el-radio__label { color: var(--text-hi)
   --el-tag-text-color: var(--ice-soft);
 }
 .el-tag--success {
-  --el-tag-bg-color: rgba(52, 211, 153, .10);
-  --el-tag-border-color: rgba(52, 211, 153, .32);
-  --el-tag-text-color: #6ee7b7;
+  --el-tag-bg-color: rgba(52, 211, 153, .13);
+  --el-tag-border-color: rgba(52, 211, 153, .35);
+  --el-tag-text-color: #7fe9c0;
 }
 .el-tag--warning {
   --el-tag-bg-color: rgba(251, 191, 36, .10);
@@ -3212,11 +3630,16 @@ html.dark .el-radio__input.is-checked + .el-radio__label { color: var(--text-hi)
    按压内收。类型色经 --btn-accent（R,G,B）供 box-shadow 复用；link 变体不吃底色。 */
 
 .el-button {
-  border-radius: 7px;
+  border-radius: 8px;
   font-family: var(--font-display);
   letter-spacing: .02em;
   transition: color .18s, background-color .18s, border-color .18s, box-shadow .18s;
 }
+
+/* 表格行选复选框略放大，与 13px 正文字号匹配 */
+.el-table .el-checkbox { height: auto; }
+.el-table .el-checkbox__inner { width: 15px; height: 15px; }
+.el-table .el-checkbox__inner::after { left: 4.5px; top: 1.5px; }
 /* 无类型的默认按钮：中性细描边 */
 html.dark .el-button {
   --btn-accent: 148, 180, 220;
@@ -3236,8 +3659,8 @@ html.dark .el-button {
 html.dark .el-button--primary {
   --btn-accent: 111, 211, 242;
   --el-button-text-color: var(--ice);
-  --el-button-bg-color: rgba(111, 211, 242, .07);
-  --el-button-border-color: rgba(111, 211, 242, .48);
+  --el-button-bg-color: rgba(111, 211, 242, .09);
+  --el-button-border-color: rgba(111, 211, 242, .58);
   --el-button-hover-text-color: #b5ecfb;
   --el-button-hover-bg-color: rgba(111, 211, 242, .16);
   --el-button-hover-border-color: var(--ice);
@@ -3331,7 +3754,8 @@ html.dark .el-textarea__inner {
 
 /* ---------- 弹层：抽屉 / 对话框 ---------- */
 
-.el-drawer { --el-drawer-bg-color: #0d1526; }
+.el-drawer { --el-drawer-bg-color: #0d1526; animation: drawer-in .3s ease both; }
+@keyframes drawer-in { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
 .el-drawer__header {
   margin-bottom: 14px;
   padding-bottom: 14px;
@@ -3346,6 +3770,11 @@ html.dark .el-textarea__inner {
   border-radius: 14px;
   background: #0e1728;
   box-shadow: 0 30px 80px -20px rgba(0, 0, 0, .65);
+  animation: dialog-in .32s cubic-bezier(.2, .7, .25, 1) both;
+}
+@keyframes dialog-in {
+  from { opacity: 0; transform: translateY(16px) scale(.975); }
+  to { opacity: 1; transform: none; }
 }
 .el-dialog__header { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .el-dialog__title { color: var(--text-hi); font-weight: 600; letter-spacing: .04em; }
@@ -3375,8 +3804,13 @@ h4::before {
   background: var(--ice);
   transform: rotate(45deg);
   box-shadow: 0 0 8px rgba(111, 211, 242, .6);
+  animation: marker-pulse 3.2s ease-in-out infinite;
 }
-.detail-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+@keyframes marker-pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(111, 211, 242, .5); }
+  50% { box-shadow: 0 0 12px rgba(111, 211, 242, .95); }
+}
+.detail-stats { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 .detail-actions { margin-top: 20px; }
 .case-item {
   padding: 9px 12px;
@@ -3390,7 +3824,14 @@ h4::before {
 .score-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .score-name { width: 130px; font-size: 13px; flex-shrink: 0; color: var(--text-mid); }
 .score-bar { flex: 0 0 160px; }
-.score-reason { font-size: 12px; color: var(--text-low); }
+/* LLM 分与规则分的轨道配色区分语义：LLM 冰青渐变、规则分中性石板 */
+.score-bar.llm .el-progress-bar__inner {
+  background: linear-gradient(90deg, #2d7fa8, #6fd3f2);
+}
+.score-bar.rule .el-progress-bar__inner {
+  background: #55688a;
+}
+.score-reason { flex: 1; min-width: 0; font-size: 12px; color: var(--text-mid); line-height: 1.6; }
 .verdict.el-card {
   background: rgba(52, 211, 153, .05);
   border: 1px solid rgba(52, 211, 153, .22);
@@ -3430,7 +3871,11 @@ h4::before {
 
 /* ---------- 卡片（课程 / 技能） ---------- */
 
-.course-col { margin-bottom: 14px; }
+/* 卡片入场上 stagger（--d 由 v-for 注入，上限 660ms 防长列表拖尾） */
+.course-col {
+  margin-bottom: 14px;
+  animation: rise .55s cubic-bezier(.2, .7, .25, 1) min(calc(var(--d, 0) * 55ms), 660ms) both;
+}
 .course-card.el-card {
   position: relative;
   overflow: hidden;
@@ -3455,11 +3900,90 @@ h4::before {
   box-shadow: 0 16px 32px -14px rgba(0, 0, 0, .5), 0 0 22px rgba(111, 211, 242, .08);
 }
 .course-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.course-title { font-weight: 700; font-size: 15px; line-height: 1.4; color: var(--text-hi); }
-.course-meta { margin: 6px 0 10px; }
+.course-title {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--text-hi);
+  text-wrap: balance;
+}
+/* 卡片状态徽章提亮：完成态是关键信息，压过环境噪声 */
+.course-head .el-tag {
+  font-size: 12px;
+  padding: 0 9px;
+  line-height: 22px;
+  border-width: 1px;
+  flex-shrink: 0;
+}
+.course-head .el-tag--success {
+  --el-tag-bg-color: rgba(52, 211, 153, .16);
+  --el-tag-border-color: rgba(52, 211, 153, .5);
+  --el-tag-text-color: #8af0c8;
+  box-shadow: 0 0 10px rgba(52, 211, 153, .12);
+}
+.course-head .el-tag--primary {
+  --el-tag-bg-color: rgba(111, 211, 242, .14);
+  --el-tag-border-color: rgba(111, 211, 242, .48);
+  --el-tag-text-color: #a8e6fa;
+}
+.course-meta { margin: 6px 0 8px; }
+.src-badge {
+  display: inline-block;
+  color: var(--ice);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .02em;
+  margin-right: 8px;
+  padding: 0 6px;
+  line-height: 17px;
+  border: 1px solid rgba(111, 211, 242, .3);
+  border-radius: 3px;
+  background: rgba(111, 211, 242, .06);
+}
+/* 课程完成度微条（lessons 区上方的 4px 量程） */
+.course-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, .06);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.course-progress i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #34d399, #6fd3f2);
+  box-shadow: 0 0 8px rgba(52, 211, 153, .5);
+  transition: width .5s cubic-bezier(.2, .7, .25, 1);
+}
 .course-lessons { border-top: 1px dashed var(--line-strong); padding-top: 8px; margin-bottom: 12px; }
 .lesson-row { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 13px; }
-.lesson-check { flex-shrink: 0; }
+.lesson-check {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, .02);
+  position: relative;
+  transition: border-color .2s, background-color .2s;
+}
+.lesson-check.done {
+  border-color: rgba(52, 211, 153, .6);
+  background: rgba(52, 211, 153, .13);
+  box-shadow: 0 0 6px rgba(52, 211, 153, .18);
+}
+.lesson-check.done::after {
+  content: '';
+  position: absolute;
+  left: 3.5px;
+  top: 1px;
+  width: 4px;
+  height: 7px;
+  border: solid #6ee7b7;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(42deg);
+}
 .lesson-name { flex: 1; color: var(--text-mid); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lesson-score { color: #6ee7b7; font-weight: 600; font-size: 12px; flex-shrink: 0; font-family: var(--font-mono); }
 .course-actions { text-align: right; }
@@ -3542,7 +4066,7 @@ h4::before {
   border-radius: 4px;
   padding: 9px 13px;
 }
-.scaffold-fit-tag { margin-left: 8px; }
+.scaffold-fit-tag { margin-left: 8px; white-space: nowrap; }
 .adopt-box {
   display: flex;
   flex-direction: column;
@@ -3635,12 +4159,46 @@ h4::before {
 }
 .el-pagination button { background-color: transparent; color: var(--text-mid); }
 .el-pagination .el-pagination__total { color: var(--text-low); font-size: 12px; font-family: var(--font-mono); }
-.el-empty__description p { color: var(--text-low); }
+
+/* 空态：换上慢转的水晶星标 + mono 注释文案（EP 默认灰盘子与主题不符） */
+.el-empty { padding: 36px 0 28px; }
+.el-empty__image { width: 76px; margin-bottom: 16px; }
+.el-empty__image svg { display: none; }
+.el-empty__image::before {
+  content: '';
+  display: block;
+  width: 42px;
+  height: 42px;
+  margin: 0 auto;
+  background: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none'%3E%3Cg stroke='%236fd3f2' stroke-width='1.1' stroke-linecap='round'%3E%3Cpath d='M12 1.6v20.8M2.9 6.9l18.2 10.2M21.1 6.9L2.9 17.1'/%3E%3Cpath d='M9.9 3.9L12 6l2.1-2.1M14.1 20.1L12 18l-2.1 2.1M2.5 10.2l2.9.6.6-2.9M21.5 13.8l-2.9-.6-.6 2.9'/%3E%3C/g%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: .85;
+  filter: drop-shadow(0 0 10px rgba(111, 211, 242, .4));
+  animation: spin-slow 70s linear infinite;
+}
+.el-empty__description p {
+  color: var(--text-low);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: .02em;
+  line-height: 1.8;
+}
 
 /* ---------- 右下角任务中心 ----------
    z-index 2400 压过 el-drawer/el-dialog（popup 基准 2000+）：
    脚手架流程就是抽屉开着跑 338s 生成任务，进度卡必须始终可见 */
-.task-center { position: fixed; right: 20px; bottom: 20px; width: 380px; max-width: calc(100vw - 40px); z-index: 2400; }
+.task-center {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  width: 380px;
+  max-width: calc(100vw - 40px);
+  z-index: 2400;
+  animation: tc-enter .45s cubic-bezier(.2, .7, .25, 1) both;
+}
+@keyframes tc-enter {
+  from { opacity: 0; transform: translateY(26px) scale(.97); }
+  to { opacity: 1; transform: none; }
+}
 .tc-head {
   display: flex;
   align-items: center;
@@ -3738,10 +4296,63 @@ h4::before {
 .log-line { font-family: var(--font-mono); font-size: 12px; line-height: 1.7; color: var(--text-mid); word-break: break-word; }
 .log-time { margin-right: 8px; color: var(--text-low); }
 
+/* ---------- 响应式 ---------- */
+
+@media (max-width: 1360px) {
+  .search { width: 200px; }
+}
+
+@media (max-width: 1180px) {
+  .sys-status { display: none; }
+}
+
+@media (max-width: 1024px) {
+  .layout > .el-main { padding: 18px 18px 40px; }
+  .search, .industry-input, .repo-select { width: auto; min-width: 170px; flex: 1 1 220px; }
+  .tag-select, .diff-select { flex: 0 1 160px; }
+}
+
+@media (max-width: 760px) {
+  .layout > .el-main { padding: 14px 12px 36px; }
+  .header {
+    --el-header-height: auto;
+    height: auto;
+    min-height: 58px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    gap: 8px 12px;
+  }
+  .brand-name { font-size: 16px; }
+  .brand-sub { display: none; }
+  .ops { margin-left: auto; }
+  .sys-clock { display: none; }
+  .ai-bar { padding: 10px 11px; gap: 9px; }
+  .main-tabs .el-tab-pane { padding: 14px 12px; }
+  .main-tabs .el-tabs__item { padding: 0 13px; font-size: 13.5px; }
+  .tab-label i { margin-right: 6px; }
+  .toolbar { gap: 8px; }
+  .tool-group { gap: 8px; }
+  .picked-hint { margin-left: 0; flex-basis: 100%; text-align: left; }
+  /* 窄屏表格降密：横向滚动是数据表的归宿，行高与单元格内距收紧 */
+  .el-table .cell { padding: 0 8px; }
+  .el-table th.el-table__cell, .el-table td.el-table__cell { padding: 6px 0; }
+  .task-center { right: 12px; bottom: 12px; }
+  .tc-list { max-height: 46vh; }
+  .six-list { grid-template-columns: 1fr; }
+  .split-line1 { flex-wrap: wrap; }
+  .split-name { width: 100%; }
+}
+
+@media (max-width: 720px) {
+  .el-dialog { width: 92vw !important; margin-top: 5vh !important; }
+  .el-drawer.ltr, .el-drawer.rtl { width: 94vw !important; }
+}
+
 /* ---------- 动效偏好 ---------- */
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .brand-mark { animation: none !important; }
+  .sky-aurora, .sky-stars { animation: none !important; }
 }
 </style>
